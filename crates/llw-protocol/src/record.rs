@@ -29,6 +29,8 @@ pub struct DeviceRecord {
     pub cmd_seq: u8,
     pub kind: DeviceKind,
     pub list_index: u8,
+    /// Coolant temperature in °C. `None` if the device is not an AIO,
+    /// or if the sensor byte is 0x00 (sensor absent / not initialized).
     pub coolant_temp_c: Option<u8>,
     /// Effect index the firmware is currently running (drifts on firmware
     /// idle-reset; compare against desired to detect and re-send RGB).
@@ -153,7 +155,8 @@ pub struct GetDevReport {
 ///
 /// Returns None if the response is not a GetDev echo.
 pub fn parse_getdev_response(response: &[u8], len: usize) -> Option<GetDevReport> {
-    if len < 4 || response[0] != crate::consts::USB_CMD_SEND_RF {
+    let response = response.get(..len)?;
+    if response.len() < 4 || response[0] != crate::consts::USB_CMD_SEND_RF {
         return None;
     }
 
@@ -170,7 +173,11 @@ pub fn parse_getdev_response(response: &[u8], len: usize) -> Option<GetDevReport
     }
 
     let device_count = response[1] as usize;
-    if device_count == 0 || device_count > 12 {
+    if device_count > 12 {
+        debug!("GetDev: implausible device_count {device_count} (max 12), ignoring records");
+        return Some(report);
+    }
+    if device_count == 0 {
         return Some(report);
     }
 
@@ -309,5 +316,49 @@ pub(crate) mod tests {
         resp[4..46].copy_from_slice(&rec);
         let report = parse_getdev_response(&resp, resp.len()).expect("valid response");
         assert_eq!(report.devices.len(), 1);
+    }
+
+    #[test]
+    fn parses_aio_coolant_temp() {
+        let mut raw = make_record(
+            MAC, MASTER, 2, 5, 10, 1, [0, 0, 0, 0], [0, 0, 0, 1900], [0, 0, 0, 128],
+        );
+        raw[27] = 34; // coolant temp — overlaps 4th fan-type byte
+        let rec = parse_device_record(&raw, 0).expect("valid record");
+        assert_eq!(rec.kind, crate::device_kind::DeviceKind::WaterBlock);
+        assert_eq!(rec.coolant_temp_c, Some(34));
+        assert_eq!(rec.total_leds(), 48); // 24 pump + 1 fan × 24
+
+        raw[27] = 0; // sensor byte zero → None even for AIO
+        let rec = parse_device_record(&raw, 0).expect("valid record");
+        assert_eq!(rec.coolant_temp_c, None);
+    }
+
+    #[test]
+    fn implausible_device_count_ignored() {
+        let mut resp = vec![0u8; 4];
+        resp[0] = 0x10;
+        resp[1] = 13; // > 12
+        resp[2] = 0x80;
+        let report = parse_getdev_response(&resp, 4).expect("valid response");
+        assert!(report.devices.is_empty());
+    }
+
+    #[test]
+    fn fan_count_clamped_to_four() {
+        let mut raw = make_record(MAC, MASTER, 2, 3, 0, 2, [36, 36, 0, 0], [0; 4], [0; 4]);
+        raw[19] = 255;
+        let rec = parse_device_record(&raw, 0).expect("valid record");
+        assert_eq!(rec.fan_count, 4);
+    }
+
+    #[test]
+    fn getdev_short_buffer_and_zero_denominator() {
+        // buffer shorter than claimed len must not panic (hardening regression)
+        assert!(parse_getdev_response(&[0x10, 0], 4).is_none());
+        // off_time = 0, on_time = 0 → mobo pwm unavailable, no div-by-zero
+        let resp = [0x10, 0, 0, 0];
+        let report = parse_getdev_response(&resp, 4).expect("valid response");
+        assert_eq!(report.mobo_pwm, None);
     }
 }
