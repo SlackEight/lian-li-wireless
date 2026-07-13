@@ -23,7 +23,7 @@ pub fn static_frame(rec: &DeviceRecord, color: &StaticColor) -> Vec<[u8; 3]> {
 
 /// The effect index `Dongle::upload_rgb` will produce for this frame —
 /// compare against the device record's echoed index to detect firmware drift.
-#[allow(dead_code)] // future-facing: supervisor rgb_tick may add debug_assert_eq; used in module tests
+#[allow(dead_code)] // M3: effect engine computes expected indices for arbitrary frames; used in module tests
 pub fn expected_index(frame: &[[u8; 3]]) -> [u8; 4] {
     effect_index_from_frames(std::slice::from_ref(&frame.to_vec()))
 }
