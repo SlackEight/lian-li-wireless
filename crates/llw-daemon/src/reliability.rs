@@ -96,9 +96,11 @@ impl Reliability {
 
     /// Call after every successful acquisition (startup or recovery).
     /// Starts the grace period and clears transient state.
+    /// Also clears the failed-tier1 escalation streak: a successful acquisition IS recovery.
     pub fn on_acquired(&mut self, now: Instant) {
         self.acquired_at = Some(now);
         self.dropouts.clear();
+        self.failed_tier1_streak = 0;
     }
 
     /// Record one dropout observation (commanded PWM present, readback all-zero).
@@ -326,6 +328,32 @@ mod tests {
         // (pins the streak-reset on Tier-2 fire: without it this refires)
         assert_eq!(r.poll(ts(t0, 900)), Action::None);
         assert_eq!(r.telemetry().total_tier2, 1);
+    }
+
+    #[test]
+    fn acquired_clears_escalation_streak() {
+        // Two failed tier-1 attempts build a streak; then a successful acquisition
+        // clears it. After that, polling well past all cooldowns with no dropouts
+        // must stay quiet (no stale Reconnect).
+        let cfg = ReliabilityConfig {
+            grace_s: 0,
+            tier1_cooldown_s: 0,
+            tier2_cooldown_s: 0,
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let mut r = Reliability::new(&cfg);
+        r.on_acquired(t0);
+        storm(&mut r, t0, 1, 5);
+        assert_eq!(r.poll(ts(t0, 2)), Action::Reacquire);
+        r.on_tier1_result(false); // streak = 1
+        storm(&mut r, t0, 10, 5);
+        assert_eq!(r.poll(ts(t0, 11)), Action::Reacquire);
+        r.on_tier1_result(false); // streak = 2
+        // Successful acquisition → streak reset to 0 before Reconnect can fire.
+        r.on_acquired(ts(t0, 20));
+        // Now well past every cooldown: machine must be quiet.
+        assert_eq!(r.poll(ts(t0, 900)), Action::None, "stale streak must not fire Reconnect after on_acquired");
     }
 
     #[test]

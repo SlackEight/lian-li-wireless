@@ -84,7 +84,7 @@ pub struct ControlConfig {
     /// PWM keepalive interval in ms (firmware reverts without traffic).
     pub keepalive_ms: u64,
     /// Fan % commanded when a curve's sensor has been unreadable for over a
-    /// minute (never leave fans on a stale duty forever).
+    /// minute — or immediately if it has never produced a reading.
     #[serde(default = "default_sensor_failsafe")]
     pub sensor_failsafe_percent: u8,
 }

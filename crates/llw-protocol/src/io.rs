@@ -35,6 +35,7 @@ impl UsbIo for crate::transport::UsbTransport {
 pub struct FakeIo {
     writes: Mutex<Vec<Vec<u8>>>,
     reads: Mutex<VecDeque<Result<Vec<u8>>>>,
+    write_errors: Mutex<VecDeque<crate::ProtocolError>>,
 }
 
 impl FakeIo {
@@ -52,10 +53,16 @@ impl FakeIo {
     pub fn drain_reads(&self) {
         self.reads.lock().unwrap().clear();
     }
+    pub fn push_write_err(&self, err: crate::ProtocolError) {
+        self.write_errors.lock().unwrap().push_back(err);
+    }
 }
 
 impl UsbIo for FakeIo {
     fn write(&self, data: &[u8], _timeout: Duration) -> Result<usize> {
+        if let Some(e) = self.write_errors.lock().unwrap().pop_front() {
+            return Err(e);
+        }
         self.writes.lock().unwrap().push(data.to_vec());
         Ok(data.len())
     }
@@ -74,4 +81,23 @@ impl UsbIo for FakeIo {
     // pre-staged request-response scripts intact. Tests that model stale-pipe
     // scenarios should call `drain_reads()` explicitly at the flush boundary.
     fn read_flush(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_write_err_returns_err_then_subsequent_writes_succeed() {
+        let io = FakeIo::default();
+        io.push_write_err(crate::ProtocolError::Other("injected write failure".into()));
+        // First write: returns Err and is NOT recorded.
+        let result = io.write(b"first", Duration::from_millis(100));
+        assert!(result.is_err(), "scripted write error must surface");
+        assert_eq!(io.written().len(), 0, "failed write must not be recorded");
+        // Second write: no error queued → succeeds and is recorded.
+        let result = io.write(b"second", Duration::from_millis(100));
+        assert!(result.is_ok(), "subsequent write must succeed");
+        assert_eq!(io.written(), vec![b"second".to_vec()]);
+    }
 }

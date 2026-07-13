@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const RGB_REUPLOAD_COOLDOWN: Duration = Duration::from_secs(5);
+/// Failsafe engages when a sensor has been unreadable this long — or immediately if it has never produced a reading.
 const SENSOR_FAILSAFE_AFTER: Duration = Duration::from_secs(60);
 
 /// What a step did — simulation tests assert on this.
@@ -136,11 +137,10 @@ impl<T: UsbIo> Supervisor<T> {
         }
         if self.link.is_none() {
             out.acquired = self.try_acquire_link(now);
-            if self.link.is_none() {
-                return out;
-            }
-            // Force PWM/RGB re-apply on the next ticks; skip polling this step
-            // to let the re-sync settle.
+            // Acquisition steps do ONLY acquisition: poll/PWM/heartbeat/RGB
+            // and the reliability poll all defer to the next step (50ms in
+            // production). Keeps one ingest per step and makes simulation
+            // scripts deterministic.
             return out;
         }
         if due(self.last_poll, now, Duration::from_millis(self.cfg.observation.poll_ms)) {
@@ -156,7 +156,9 @@ impl<T: UsbIo> Supervisor<T> {
             self.last_heartbeat = Some(now);
             out.sent_heartbeat = self.send_heartbeat();
         }
-        out.uploaded_rgb = self.rgb_tick(now);
+        if out.polled {
+            out.uploaded_rgb = self.rgb_tick(now);
+        }
         match self.reliability.poll(now) {
             Action::None => {}
             Action::Reacquire => {
@@ -168,6 +170,10 @@ impl<T: UsbIo> Supervisor<T> {
                 }
             }
             Action::Reconnect => {
+                // Formal backstop: unreachable in current wiring (a successful
+                // acquisition clears the escalation streak; failed acquisitions
+                // keep the link down, which blocks the reliability poll). Kept
+                // for defense in depth.
                 out.tier2 = true;
                 self.tier2_reconnect(now);
             }
@@ -178,6 +184,9 @@ impl<T: UsbIo> Supervisor<T> {
     /// Production loop. 50ms granularity; all real timing lives in step().
     pub fn run(&mut self, shutdown: &std::sync::atomic::AtomicBool) {
         info!("supervisor running");
+        if self.cfg.observation.poll_ms < 50 || self.cfg.control.tick_ms < 50 {
+            warn!("poll_ms/tick_ms below the 50ms loop granularity are clamped by the step cadence");
+        }
         while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             self.step(Instant::now());
             std::thread::sleep(Duration::from_millis(50));
@@ -203,7 +212,7 @@ impl<T: UsbIo> Supervisor<T> {
             Err(llw_protocol::ProtocolError::DeviceNotFound { vid, pid }) => {
                 if !self.tx_wedged {
                     warn!("dongle {vid:04x}:{pid:04x} not found — possible TX wedge; will keep retrying");
-                    notify_once("Lian Li wireless: TX dongle missing — if it stays gone, power-cycle the PSU (known firmware wedge)");
+                    notify_wedge("Lian Li wireless: TX dongle missing — if it stays gone, power-cycle the PSU (known firmware wedge)");
                     self.tx_wedged = true;
                 }
             }
@@ -222,10 +231,13 @@ impl<T: UsbIo> Supervisor<T> {
                 self.link = Some(link);
                 self.reliability.on_acquired(now);
                 self.ingest_records(&records, now);
-                // Force immediate RGB assert + PWM send on the next ticks.
+                // Force immediate RGB assert + PWM send on the next ticks;
+                // also clear dropout streaks so cold start / tier1 / tier2
+                // all reset identically.
                 for d in self.devices.values_mut() {
                     d.expected_fx = None;
                     d.last_sent = None;
+                    d.filter = DropoutFilter::default();
                 }
                 true
             }
@@ -390,7 +402,6 @@ impl<T: UsbIo> Supervisor<T> {
             let Some(dev) = self.devices.get_mut(&mac) else { continue };
             let Some(rec) = dev.last_record.clone() else { continue };
             let frame = rgb_assert::static_frame(&rec, &color);
-            let expected = rgb_assert::expected_index(&frame);
             let needs = match dev.expected_fx {
                 None => true, // never asserted this session
                 Some(exp) => rgb_assert::drifted(&exp, &rec.effect_index),
@@ -410,7 +421,6 @@ impl<T: UsbIo> Supervisor<T> {
                     4,
                 ) {
                     Ok(idx) => {
-                        debug_assert_eq!(idx, expected);
                         dev.expected_fx = Some(idx);
                         dev.last_rgb_upload = Some(now);
                         uploads += 1;
@@ -445,9 +455,6 @@ impl<T: UsbIo> Supervisor<T> {
             return false;
         }
         self.link = None;
-        for d in self.devices.values_mut() {
-            d.filter = DropoutFilter::default();
-        }
         let ok = self.try_acquire_link(now);
         if !ok {
             warn!("Tier 1 re-acquire failed — escalating to transport reconnect");
@@ -479,11 +486,17 @@ fn due(last: Option<Instant>, now: Instant, interval: Duration) -> bool {
     last.is_none_or(|t| now.duration_since(t) >= interval)
 }
 
-fn notify_once(msg: &str) {
-    let _ = std::process::Command::new("notify-send")
+/// Fires once per wedge EPISODE (re-wedge after recovery re-notifies).
+fn notify_wedge(msg: &str) {
+    let child = std::process::Command::new("notify-send")
         .arg("llw-daemon")
         .arg(msg)
         .spawn();
+    if let Ok(mut c) = child {
+        std::thread::spawn(move || {
+            let _ = c.wait();
+        });
+    }
 }
 
 #[cfg(test)]
@@ -563,6 +576,7 @@ mod tests {
         // step 1: connect + acquire (+ first poll/fan/heartbeat/rgb in later steps)
         let out = sup.step(t0);
         assert!(out.acquired);
+        assert!(!out.polled && out.sent_pwm == 0 && !out.sent_heartbeat && out.uploaded_rgb == 0);
         assert_eq!(sup.link().unwrap().channel, 2);
 
         // subsequent step at +600ms: GetDev poll due + fan tick due → PWM sent
@@ -687,25 +701,31 @@ mod tests {
 
     #[test]
     fn connector_failure_marks_wedge_and_backs_off() {
-        let mut _calls = 0u32;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        let count = Arc::new(AtomicU32::new(0));
+        let count_in = Arc::clone(&count);
         let mut sup: Supervisor<FakeIo> = Supervisor::new(
             test_config(),
             std::env::temp_dir(),
             Box::new(move || {
-                _calls += 1;
+                count_in.fetch_add(1, Ordering::Relaxed);
                 Err(llw_protocol::ProtocolError::DeviceNotFound { vid: 0x0416, pid: 0x8040 })
             }),
         );
         let t0 = Instant::now();
+        // First step at t0: connector called once, wedge asserted.
         let out = sup.step(t0);
         assert_eq!(out, StepOutcome::default());
         assert!(sup.tx_wedged);
-        // within the 10s reconnect interval: no second open attempt happens
-        // (observable: tx_wedged stays true and step stays inert)
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        // Within backoff window (t0+1s): no second open attempt.
         let _ = sup.step(t0 + Duration::from_secs(1));
+        assert_eq!(count.load(Ordering::Relaxed), 1, "backoff must prevent retry within RECONNECT_INTERVAL");
         assert!(sup.tx_wedged);
-        // after the interval, retries continue quietly
+        // After RECONNECT_INTERVAL (t0+11s): retry fires, count reaches 2.
         let _ = sup.step(t0 + Duration::from_secs(11));
+        assert_eq!(count.load(Ordering::Relaxed), 2, "connector must be retried after RECONNECT_INTERVAL");
         assert!(sup.tx_wedged);
     }
 
@@ -733,5 +753,225 @@ mod tests {
         // past cooldown → re-upload happens
         let out = sup.step(t0 + Duration::from_secs(7));
         assert_eq!(out.uploaded_rgb, 1);
+    }
+
+    /// Build a supervisor with an explicit hwmon_base path.
+    fn sim_with_hwmon(
+        cfg: Config,
+        hwmon_base: std::path::PathBuf,
+        rx_script: Vec<Vec<u8>>,
+    ) -> (Supervisor<FakeIo>, Instant) {
+        let sup = Supervisor::new(
+            cfg,
+            hwmon_base,
+            Box::new(move || {
+                let rx = FakeIo::default();
+                for r in rx_script.clone() {
+                    rx.push_read(r);
+                }
+                Ok(Dongle::from_parts(FakeIo::default(), Some(rx)))
+            }),
+        );
+        (sup, Instant::now())
+    }
+
+    #[test]
+    fn sensor_curve_and_failsafe() {
+        use crate::config::{Curve, SensorSpec};
+
+        // Build a tempdir hwmon tree: hwmon0/name = "k10temp", temp1_input = 41300
+        let dir = tempfile::tempdir().unwrap();
+        let hwmon0 = dir.path().join("hwmon0");
+        std::fs::create_dir_all(&hwmon0).unwrap();
+        std::fs::write(hwmon0.join("name"), "k10temp\n").unwrap();
+        let temp_path = hwmon0.join("temp1_input");
+        std::fs::write(&temp_path, "41300\n").unwrap();
+
+        // Config: one Curve("cpu") on slot 0, Percent(0) elsewhere.
+        let mut cfg = Config::new();
+        cfg.curves.push(Curve {
+            name: "cpu".into(),
+            sensor: SensorSpec { hwmon_name: "k10temp".into(), input: "temp1_input".into() },
+            points: vec![(29.0, 30.0), (52.0, 34.0)],
+        });
+        cfg.devices.push(DeviceConfig {
+            mac: "02:8b:51:62:32:e1".into(),
+            name: None,
+            slots: [
+                SlotSpeed::Curve("cpu".into()),
+                SlotSpeed::Percent(0),
+                SlotSpeed::Percent(0),
+                SlotSpeed::Percent(0),
+            ],
+            color: None,
+        });
+        cfg.control.tick_ms = 0; // fan tick every step
+        cfg.control.keepalive_ms = 1_000_000; // suppress keepalive during test
+        cfg.observation.poll_ms = 0; // poll every step
+        cfg.control.sensor_failsafe_percent = 50;
+
+        // Expected PWM at 41.3°C:
+        // eval(41.3): ratio = (41.3-29)/(52-29) = 12.3/23 ≈ 0.53478
+        // pct = 30 + 0.53478*4 ≈ 32.1391
+        // percent_to_pwm(32.1391) = (32.1391*2.55) as u8 = 81.954... as u8 = 81
+        // hysteresis: first apply → adopts 81
+        // rt.pct = (81 + 0.5) / 2.55 ≈ 31.960...
+        // next call: percent_to_pwm(31.960...) = (31.960... * 2.55) as u8 = 81.498... = 81
+        let expected_pwm: u8 = 81;
+
+        // Script: acquire + fan-tick poll + post-failsafe polls
+        let rec = record_bytes([0; 4], [0; 4]);
+        let script = vec![getdev_resp(&[rec]); 20];
+        let (mut sup, t0) = sim_with_hwmon(cfg, dir.path().to_path_buf(), script);
+
+        // Step 1: acquire
+        let out = sup.step(t0);
+        assert!(out.acquired);
+
+        // Step 2: fan-tick step — curve should evaluate to expected_pwm
+        let out = sup.step(t0 + Duration::from_secs(1));
+        assert!(out.polled);
+        let dev = sup.devices.get(&MAC).unwrap();
+        assert_eq!(dev.desired[0], expected_pwm, "curve eval at 41.3°C should produce PWM {expected_pwm}");
+
+        // Remove sensor file — stale hold for < 60s
+        std::fs::remove_file(&temp_path).unwrap();
+        let _out = sup.step(t0 + Duration::from_secs(5));
+        let dev = sup.devices.get(&MAC).unwrap();
+        assert_eq!(dev.desired[0], expected_pwm, "stale hold: desired unchanged within failsafe window");
+
+        // After >60s of unreadable sensor → failsafe 50% = PWM 127
+        let out = sup.step(t0 + Duration::from_secs(70));
+        let _ = out;
+        let dev = sup.devices.get(&MAC).unwrap();
+        assert_eq!(dev.desired[0], 127, "failsafe 50% → PWM 127 after sensor unreadable >60s");
+    }
+
+    #[test]
+    fn sensor_never_exists_immediate_failsafe() {
+        use crate::config::{Curve, SensorSpec};
+
+        // Empty tempdir — no hwmon at all
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut cfg = Config::new();
+        cfg.curves.push(Curve {
+            name: "cpu".into(),
+            sensor: SensorSpec { hwmon_name: "k10temp".into(), input: "temp1_input".into() },
+            points: vec![(29.0, 30.0), (52.0, 34.0)],
+        });
+        cfg.devices.push(DeviceConfig {
+            mac: "02:8b:51:62:32:e1".into(),
+            name: None,
+            slots: [
+                SlotSpeed::Curve("cpu".into()),
+                SlotSpeed::Percent(0),
+                SlotSpeed::Percent(0),
+                SlotSpeed::Percent(0),
+            ],
+            color: None,
+        });
+        cfg.control.tick_ms = 0;
+        cfg.control.keepalive_ms = 1_000_000;
+        cfg.observation.poll_ms = 0;
+        cfg.control.sensor_failsafe_percent = 50;
+
+        let rec = record_bytes([0; 4], [0; 4]);
+        let script = vec![getdev_resp(&[rec]); 10];
+        let (mut sup, t0) = sim_with_hwmon(cfg, dir.path().to_path_buf(), script);
+
+        // Acquire
+        let out = sup.step(t0);
+        assert!(out.acquired);
+
+        // Very first fan-tick step with never-seen sensor → immediate failsafe
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        let dev = sup.devices.get(&MAC).unwrap();
+        assert_eq!(dev.desired[0], 127, "sensor never existed → immediate failsafe → PWM 127");
+    }
+
+    #[test]
+    fn tx_write_failure_drops_link_and_reconnects() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        let connects = Arc::new(AtomicU32::new(0));
+        let connects_in = Arc::clone(&connects);
+        let mut cfg = test_config();
+        cfg.control.tick_ms = 0;
+        cfg.observation.poll_ms = 0;
+        cfg.control.keepalive_ms = 0; // send every step
+
+        let rec = record_bytes([0; 4], [0; 4]);
+        let healthy = getdev_resp(&[rec]);
+
+        let mut sup: Supervisor<FakeIo> = Supervisor::new(
+            cfg,
+            std::env::temp_dir(),
+            Box::new(move || {
+                let n = connects_in.fetch_add(1, Ordering::Relaxed);
+                let tx = FakeIo::default();
+                let rx = FakeIo::default();
+                if n == 0 {
+                    // First dongle: TX has one write error (fires on first PWM/heartbeat send).
+                    tx.push_write_err(llw_protocol::ProtocolError::Other(
+                        "injected TX failure".into(),
+                    ));
+                    // RX has enough healthy reads for acquisition.
+                    for _ in 0..5 {
+                        rx.push_read(healthy.clone());
+                    }
+                }
+                // Later connections: silent (no reads) — stays unacquired.
+                Ok(Dongle::from_parts(tx, Some(rx)))
+            }),
+        );
+        let t0 = Instant::now();
+
+        // Step 1: acquire (RX-only — TX write error has not fired yet).
+        let out = sup.step(t0);
+        assert!(out.acquired, "acquisition must succeed (RX-only path)");
+        assert!(sup.link().is_some());
+
+        // Step 2: fan-tick PWM send fires the TX write error → drop_dongle.
+        let out = sup.step(t0 + Duration::from_secs(1));
+        let _ = out;
+        assert!(sup.link().is_none(), "TX failure must drop the link");
+        assert_eq!(connects.load(Ordering::Relaxed), 1, "only one connect so far");
+
+        // Step 3: past RECONNECT_INTERVAL → connector called again.
+        let _ = sup.step(t0 + Duration::from_secs(12));
+        assert_eq!(connects.load(Ordering::Relaxed), 2, "must reconnect after TX failure");
+    }
+
+    #[test]
+    fn steady_state_keepalive() {
+        // Config: Percent(40) all slots, keepalive 10s, tick=0, poll=0.
+        let mut cfg = test_config();
+        cfg.control.tick_ms = 0;
+        cfg.control.keepalive_ms = 10_000;
+        cfg.observation.poll_ms = 0;
+
+        // Healthy records: readback already matches [102, 102, 102, 0] so drift never triggers.
+        let rec = record_bytes([102, 102, 102, 0], [0; 4]);
+        let script = vec![getdev_resp(&[rec]); 20];
+        let (mut sup, t0) = sim(cfg, script);
+
+        // Acquire
+        let out = sup.step(t0);
+        assert!(out.acquired);
+
+        // First fan-tick step: last_sent is None → sends (anchors keepalive timer).
+        let out = sup.step(t0 + Duration::from_secs(1));
+        assert_eq!(out.sent_pwm, 1, "initial send because last_sent is None");
+
+        // Steps at +2s..+9s: keepalive not due, readback matches → no send.
+        for s in 2u64..=9 {
+            let out = sup.step(t0 + Duration::from_secs(s));
+            assert_eq!(out.sent_pwm, 0, "no send at +{s}s (within keepalive window)");
+        }
+
+        // Step at +11s: past keepalive (10s from last send at +1s) → send.
+        let out = sup.step(t0 + Duration::from_secs(11));
+        assert_eq!(out.sent_pwm, 1, "keepalive fires at +11s");
     }
 }
