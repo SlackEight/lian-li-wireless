@@ -27,10 +27,14 @@ impl UsbIo for crate::transport::UsbTransport {
 /// Scripted in-memory transport for tests and simulations.
 /// Writes are recorded; reads pop from a script queue (empty queue = timeout,
 /// matching real-dongle silence).
+// Deliberately always-compiled (not cfg(test)-gated) so downstream crates'
+// simulation tests (llw-daemon) can use it via a normal dependency. ~40
+// dependency-free lines in the release artifact; hidden from docs.
+#[doc(hidden)]
 #[derive(Default)]
 pub struct FakeIo {
-    pub writes: Mutex<Vec<Vec<u8>>>,
-    pub reads: Mutex<VecDeque<Result<Vec<u8>>>>,
+    writes: Mutex<Vec<Vec<u8>>>,
+    reads: Mutex<VecDeque<Result<Vec<u8>>>>,
 }
 
 impl FakeIo {
@@ -42,6 +46,11 @@ impl FakeIo {
     }
     pub fn written(&self) -> Vec<Vec<u8>> {
         self.writes.lock().unwrap().clone()
+    }
+    /// Clear all scripted reads — models a real pipe drain for tests that
+    /// need flush semantics.
+    pub fn drain_reads(&self) {
+        self.reads.lock().unwrap().clear();
     }
 }
 
@@ -61,5 +70,8 @@ impl UsbIo for FakeIo {
             None => Err(crate::ProtocolError::Usb(rusb::Error::Timeout)),
         }
     }
+    // NOTE: the real transport's read_flush DRAINS the pipe; this no-op keeps
+    // pre-staged request-response scripts intact. Tests that model stale-pipe
+    // scenarios should call `drain_reads()` explicitly at the flush boundary.
     fn read_flush(&self) {}
 }
