@@ -872,10 +872,12 @@ mod tests {
 
 Also update the usage line: `eprintln!("usage: llw-daemon --check-config | --import-lianli [path] [--force]");`
 
+Also: `Config::save` gains its first caller here — REMOVE the temporary `#[allow(dead_code)]` on `save()` in config.rs (added during Task 2 because llw-daemon is a bin crate and the fn was uncalled until now).
+
 - [ ] **Step 3: Test + commit**
 
 ```bash
-cargo test -p llw-daemon 2>&1 | tail -3   # 10 passed
+cargo test -p llw-daemon 2>&1 | tail -3   # 11 passed (10 + Task 2's review-added percent test)
 git add -A && git commit -m "feat(daemon): lianli config importer (curves, slots, static color)"
 ```
 
@@ -1004,7 +1006,7 @@ mod tests {
 - [ ] **Step 2: Register module, test, commit**
 
 ```bash
-cargo test -p llw-daemon 2>&1 | tail -3   # 13 passed
+cargo test -p llw-daemon 2>&1 | tail -3   # 14 passed
 git add -A && git commit -m "feat(daemon): native hwmon sensor resolution + EMA smoothing"
 ```
 
@@ -1147,7 +1149,7 @@ mod tests {
 - [ ] **Step 2: Register, test, commit**
 
 ```bash
-cargo test -p llw-daemon 2>&1 | tail -3   # 17 passed
+cargo test -p llw-daemon 2>&1 | tail -3   # 18 passed
 git add -A && git commit -m "feat(daemon): curve interpolation + hysteresis (live-anchored tests)"
 ```
 
@@ -1260,7 +1262,7 @@ mod tests {
 - [ ] **Step 2: Register, test, commit**
 
 ```bash
-cargo test -p llw-daemon 2>&1 | tail -3   # 20 passed
+cargo test -p llw-daemon 2>&1 | tail -3   # 21 passed
 git add -A && git commit -m "feat(daemon): fan slot resolution + keepalive send policy"
 ```
 
@@ -1542,7 +1544,7 @@ mod tests {
 - [ ] **Step 2: Register, test, commit**
 
 ```bash
-cargo test -p llw-daemon 2>&1 | tail -3   # 27 passed
+cargo test -p llw-daemon 2>&1 | tail -3   # 28 passed
 git add -A && git commit -m "feat(daemon): tiered-recovery state machine (spec 4.2, pure + exhaustive tests)"
 ```
 
@@ -1640,7 +1642,7 @@ mod tests {
 - [ ] **Step 2: Register, test, commit**
 
 ```bash
-cargo test -p llw-daemon 2>&1 | tail -3   # 30 passed
+cargo test -p llw-daemon 2>&1 | tail -3   # 31 passed
 git add -A && git commit -m "feat(daemon): static RGB assertion (brightness math + drift compare)"
 ```
 
