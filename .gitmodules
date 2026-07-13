@@ -1,6 +1,6 @@
 [submodule "vendor/tinyuz"]
 	path = vendor/tinyuz
 	url = https://github.com/sisong/tinyuz.git
-[submodule "/home/morganblem/lian-li-wireless/vendor/HDiffPatch"]
-	path = /home/morganblem/lian-li-wireless/vendor/HDiffPatch
+[submodule "vendor/HDiffPatch"]
+	path = vendor/HDiffPatch
 	url = https://github.com/sisong/HDiffPatch.git
