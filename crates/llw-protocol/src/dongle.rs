@@ -19,6 +19,26 @@ pub struct MasterInfo {
     pub firmware: Option<u16>,
 }
 
+/// Parse a GET_MAC response. Returns None if the response is not a valid
+/// echo or the MAC is all-zero (channel silent).
+pub fn parse_get_mac_response(response: &[u8], len: usize, channel: u8) -> Option<MasterInfo> {
+    let response = response.get(..len)?;
+    if response.len() < 7 || response[0] != USB_CMD_GET_MAC {
+        return None;
+    }
+    let mut mac = [0u8; 6];
+    mac.copy_from_slice(&response[1..7]);
+    if mac.iter().all(|&b| b == 0) {
+        return None;
+    }
+    let firmware = if response.len() >= 13 {
+        Some(u16::from_be_bytes([response[11], response[12]]))
+    } else {
+        None
+    };
+    Some(MasterInfo { mac, channel, firmware })
+}
+
 /// An open TX/RX dongle pair. RX is optional (telemetry only) but required
 /// for GetDev discovery.
 pub struct Dongle {
@@ -75,27 +95,17 @@ impl Dongle {
         let mut cmd = [0u8; 64];
         cmd[0] = USB_CMD_GET_MAC;
         cmd[1] = channel;
+        self.tx.read_flush(); // drop stale late answers from prior scans/resets
         self.tx.write(&cmd, USB_TIMEOUT)?;
 
         let mut response = [0u8; 64];
         let len = match self.tx.read(&mut response, Duration::from_millis(500)) {
             Ok(len) => len,
-            Err(_) => return Ok(None), // timeout = no answer on this channel
+            Err(ProtocolError::Usb(rusb::Error::Timeout)) => return Ok(None), // silent channel
+            Err(e) => return Err(e),
         };
 
-        if len >= 7 && response[0] == USB_CMD_GET_MAC {
-            let mut mac = [0u8; 6];
-            mac.copy_from_slice(&response[1..7]);
-            if mac.iter().any(|&b| b != 0) {
-                let firmware = if len >= 13 {
-                    Some(u16::from_be_bytes([response[11], response[12]]))
-                } else {
-                    None
-                };
-                return Ok(Some(MasterInfo { mac, channel, firmware }));
-            }
-        }
-        Ok(None)
+        Ok(parse_get_mac_response(&response, len, channel))
     }
 
     /// Survey every channel 1-39 and return all that answer.
@@ -118,17 +128,12 @@ impl Dongle {
                 return Ok(info);
             }
         }
-        Err(ProtocolError::Other(
-            "no master answered on any channel (1-39)".into(),
-        ))
+        Err(ProtocolError::NoMasterFound)
     }
 
     /// Poll the RX for the device list (one GetDev round-trip).
     pub fn get_dev(&mut self) -> Result<GetDevReport> {
-        let rx = self
-            .rx
-            .as_mut()
-            .ok_or_else(|| ProtocolError::Other("RX dongle not available".into()))?;
+        let rx = self.rx.as_mut().ok_or(ProtocolError::RxUnavailable)?;
 
         rx.read_flush();
         rx.write(&CMD_GET_DEV, USB_TIMEOUT)?;
@@ -136,18 +141,17 @@ impl Dongle {
         let mut response = [0u8; 512];
         let len = match rx.read(&mut response, Duration::from_millis(200)) {
             Ok(len) => len,
-            Err(_) => {
-                return Err(ProtocolError::Other(
-                    "GetDev: no response (timeout)".into(),
-                ))
+            Err(ProtocolError::Usb(rusb::Error::Timeout)) => {
+                return Err(ProtocolError::NoResponse { op: "GetDev" })
             }
+            Err(e) => return Err(e),
         };
 
-        parse_getdev_response(&response, len)
-            .ok_or_else(|| ProtocolError::Other(format!(
-                "GetDev: unexpected response 0x{:02x}",
-                response[0]
-            )))
+        parse_getdev_response(&response, len).ok_or(ProtocolError::UnexpectedResponse {
+            op: "GetDev",
+            expected: USB_CMD_SEND_RF,
+            got: response[0],
+        })
     }
 
     /// Send one 240-byte RF frame as 4 USB chunks with the 1ms inter-chunk
@@ -164,6 +168,10 @@ impl Dongle {
     /// frames, and sends header (repeated) + data packets.
     /// Returns the effect index sent (compare against future device records
     /// to detect firmware drift).
+    ///
+    /// Blocking: a max-size animation (255 RF frames × 4 chunks with 1ms gaps,
+    /// plus header repeats) holds the dongle for roughly 2-2.5 seconds; callers
+    /// with latency budgets (e.g. a 1Hz heartbeat) must schedule around uploads.
     #[allow(clippy::too_many_arguments)]
     pub fn upload_rgb(
         &mut self,
@@ -175,11 +183,7 @@ impl Dongle {
         interval_ms: u16,
         header_repeats: u8,
     ) -> Result<[u8; 4]> {
-        if led_frames.is_empty() {
-            return Err(ProtocolError::Other("no frames to upload".into()));
-        }
-        let led_num = led_frames[0].len() as u8;
-        let total_frames = led_frames.len() as u16;
+        let (led_num, total_frames) = validate_led_frames(led_frames)?;
 
         let mut raw = Vec::with_capacity(led_frames.len() * led_num as usize * 3);
         for frame in led_frames {
@@ -187,8 +191,15 @@ impl Dongle {
                 raw.extend_from_slice(px);
             }
         }
-        let effect_index = frames::effect_index_from_leds(&led_frames[0]);
+        let effect_index = frames::effect_index_from_frames(led_frames);
         let compressed = crate::tinyuz::compress(&raw)?;
+        if compressed.len() > frames::RGB_MAX_COMPRESSED {
+            return Err(ProtocolError::InvalidInput(format!(
+                "compressed RGB payload {} B exceeds protocol max {} B",
+                compressed.len(),
+                frames::RGB_MAX_COMPRESSED
+            )));
+        }
 
         let rf_frames = frames::rgb_frames(
             device_mac,
@@ -224,6 +235,33 @@ impl Dongle {
     }
 }
 
+/// Validate an animation's shape. Returns (led_num, total_frames).
+fn validate_led_frames(led_frames: &[Vec<[u8; 3]>]) -> Result<(u8, u16)> {
+    let first = led_frames
+        .first()
+        .ok_or_else(|| ProtocolError::InvalidInput("no frames to upload".into()))?;
+    if first.is_empty() || first.len() > 255 {
+        return Err(ProtocolError::InvalidInput(format!(
+            "LED count {} out of range 1-255",
+            first.len()
+        )));
+    }
+    if led_frames.len() > u16::MAX as usize {
+        return Err(ProtocolError::InvalidInput(format!(
+            "{} frames exceeds u16 range",
+            led_frames.len()
+        )));
+    }
+    if let Some(bad) = led_frames.iter().find(|f| f.len() != first.len()) {
+        return Err(ProtocolError::InvalidInput(format!(
+            "ragged animation: frame with {} LEDs, expected {}",
+            bad.len(),
+            first.len()
+        )));
+    }
+    Ok((first.len() as u8, led_frames.len() as u16))
+}
+
 fn open_any(ids: &[(u16, u16)]) -> Result<UsbTransport> {
     let mut last_err = None;
     for &(vid, pid) in ids {
@@ -252,5 +290,46 @@ mod tests {
         let idx_of = |ch: u8| order.iter().position(|&c| c == ch).unwrap();
         assert!(idx_of(2) < idx_of(1));
         assert!(idx_of(38) < idx_of(39));
+    }
+
+    #[test]
+    fn parses_get_mac_response() {
+        let mut resp = [0u8; 64];
+        resp[0] = 0x11;
+        resp[1..7].copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        resp[11] = 0x01;
+        resp[12] = 0x2C;
+        let info = parse_get_mac_response(&resp, 13, 5).expect("valid");
+        assert_eq!(info.mac, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        assert_eq!(info.channel, 5);
+        assert_eq!(info.firmware, Some(300));
+
+        let info = parse_get_mac_response(&resp, 7, 5).expect("valid");
+        assert_eq!(info.firmware, None);
+
+        let mut bad = resp;
+        bad[0] = 0x10;
+        assert!(parse_get_mac_response(&bad, 13, 5).is_none());
+
+        let mut zero = [0u8; 64];
+        zero[0] = 0x11;
+        assert!(parse_get_mac_response(&zero, 13, 5).is_none());
+
+        assert!(parse_get_mac_response(&resp[..2], 13, 5).is_none()); // len > buffer: no panic
+    }
+
+    #[test]
+    fn validates_led_frames() {
+        assert!(validate_led_frames(&[]).is_err());
+        assert!(validate_led_frames(&[vec![]]).is_err());
+        assert!(validate_led_frames(&[vec![[0, 0, 0]; 256]]).is_err());
+        assert!(validate_led_frames(&[vec![[0, 0, 0]; 4], vec![[0, 0, 0]; 5]]).is_err());
+        let (n, t) = validate_led_frames(&[
+            vec![[0, 0, 0]; 44],
+            vec![[0, 0, 0]; 44],
+            vec![[0, 0, 0]; 44],
+        ])
+        .unwrap();
+        assert_eq!((n, t), (44, 3));
     }
 }

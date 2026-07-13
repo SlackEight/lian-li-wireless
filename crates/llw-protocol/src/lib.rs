@@ -25,6 +25,21 @@ pub enum ProtocolError {
     #[error("compression failed: {0}")]
     Compression(String),
 
+    #[error("RX dongle not available")]
+    RxUnavailable,
+
+    #[error("no response to {op} (timeout)")]
+    NoResponse { op: &'static str },
+
+    #[error("unexpected response to {op}: expected 0x{expected:02x}, got 0x{got:02x}")]
+    UnexpectedResponse { op: &'static str, expected: u8, got: u8 },
+
+    #[error("no master answered on any channel (1-39)")]
+    NoMasterFound,
+
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+
     #[error("{0}")]
     Other(String),
 }

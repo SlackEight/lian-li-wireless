@@ -161,6 +161,25 @@ pub fn effect_index_from_leds(leds: &[[u8; 3]]) -> [u8; 4] {
     h.to_be_bytes()
 }
 
+/// FNV-1a hash across ALL frames of an animation (matches upstream's
+/// `effect_index_from_frames`; byte-identical to hashing the concatenated
+/// frame data). For a single frame this equals `effect_index_from_leds`.
+pub fn effect_index_from_frames(frames: &[Vec<[u8; 3]>]) -> [u8; 4] {
+    let mut h: u32 = 0x811c_9dc5;
+    for frame in frames {
+        for px in frame {
+            for &b in px {
+                h ^= b as u32;
+                h = h.wrapping_mul(0x0100_0193);
+            }
+        }
+    }
+    if h == 0 {
+        h = 1;
+    }
+    h.to_be_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +325,14 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_ne!(effect_index_from_leds(&[]), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn effect_index_from_frames_covers_all_frames() {
+        let f0 = vec![[255, 0, 0]; 4];
+        let a = effect_index_from_frames(&[f0.clone(), vec![[0, 255, 0]; 4]]);
+        let b = effect_index_from_frames(&[f0.clone(), vec![[0, 0, 255]; 4]]);
+        assert_ne!(a, b); // animations sharing frame 0 must differ
+        assert_eq!(effect_index_from_frames(&[f0.clone()]), effect_index_from_leds(&f0));
     }
 }
