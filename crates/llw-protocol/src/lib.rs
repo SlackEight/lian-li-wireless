@@ -5,6 +5,7 @@
 //! no recovery strategy. Callers (the daemon, the CLI) own all of that.
 
 pub mod consts;
+pub mod device_kind;
 pub mod tinyuz;
 
 use thiserror::Error;
