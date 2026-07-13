@@ -2,6 +2,8 @@
 //! M2a stub: config tooling only. The supervisor loop lands in M2b.
 
 mod config;
+#[allow(dead_code)] // used by the M2b supervisor
+mod curve;
 mod migrate;
 #[allow(dead_code)] // used by the M2b supervisor
 mod sensors;
