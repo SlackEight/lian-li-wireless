@@ -1,0 +1,5 @@
+# Lian Li wireless TX/RX dongles — user-space access for llw-daemon
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0416", ATTRS{idProduct}=="8040", MODE="0666"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0416", ATTRS{idProduct}=="8041", MODE="0666"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="e304", MODE="0666"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="e305", MODE="0666"

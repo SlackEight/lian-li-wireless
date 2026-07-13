@@ -1,0 +1,15 @@
+[Unit]
+Description=Lian Li Wireless daemon (fans + RGB + link supervision)
+Documentation=https://github.com/SlackEight/lian-li-wireless
+# Only one process may own the dongles:
+Conflicts=lianli-daemon.service
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/llw-daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
