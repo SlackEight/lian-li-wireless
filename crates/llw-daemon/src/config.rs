@@ -18,6 +18,8 @@ pub struct Config {
     pub control: ControlConfig,
     #[serde(default)]
     pub reliability: ReliabilityConfig,
+    #[serde(default)]
+    pub observation: ObservationConfig,
 }
 
 /// A named temp→speed curve bound to a hwmon sensor.
@@ -81,6 +83,9 @@ pub struct ControlConfig {
     pub hysteresis_pwm: u8,
     /// PWM keepalive interval in ms (firmware reverts without traffic).
     pub keepalive_ms: u64,
+    /// Fan % commanded when a curve's sensor has been unreadable for over a
+    /// minute (never leave fans on a stale duty forever).
+    pub sensor_failsafe_percent: u8,
 }
 
 impl Default for ControlConfig {
@@ -90,6 +95,7 @@ impl Default for ControlConfig {
             hysteresis_temp: 1.0,
             hysteresis_pwm: 5,
             keepalive_ms: 1000,
+            sensor_failsafe_percent: 50,
         }
     }
 }
@@ -115,6 +121,24 @@ impl Default for ReliabilityConfig {
             tier2_cooldown_s: 300,
             tier2_after_failed_tier1: 2,
         }
+    }
+}
+
+/// How raw GetDev readbacks become dropout observations (experiment-tuned:
+/// single-poll blips are normal on a healthy channel and self-heal via the
+/// 1s keepalive; only persistent readback loss is evidence of link trouble).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObservationConfig {
+    /// A dropout observation is reported for every poll at or beyond this
+    /// many CONSECUTIVE all-zero-readback polls while PWM is commanded.
+    pub consecutive_polls: u32,
+    /// GetDev poll interval in ms.
+    pub poll_ms: u64,
+}
+
+impl Default for ObservationConfig {
+    fn default() -> Self {
+        Self { consecutive_polls: 2, poll_ms: 500 }
     }
 }
 
@@ -249,6 +273,8 @@ mod tests {
             loaded.devices[0].color,
             Some(StaticColor { rgb: [255, 255, 255], brightness: 4 })
         );
+        assert_eq!(loaded.observation.consecutive_polls, 2);
+        assert_eq!(loaded.control.sensor_failsafe_percent, 50);
     }
 
     #[test]
