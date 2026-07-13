@@ -12,9 +12,10 @@
 //! on ALL paths including errors (idiom: `let ok = reacquire().is_ok();
 //! rel.on_tier1_result(ok);`), then `on_acquired(now)` on success.
 //! `Reconnect` has no result call — a failed reconnect re-escalates through
-//! fresh dropout → Tier-1-failure cycles. Failure signature to watch in
-//! telemetry: total_tier1 climbing while total_tier2 stays 0 during a
-//! persistent outage means a code path forgot on_tier1_result(false).
+//! fresh dropout → Tier-1-failure cycles. In telemetry: total_tier2 staying
+//! 0 is the normal healthy state (Reconnect is a formal backstop, delivered
+//! eagerly via the tier-1 failure path); watch total_tier1 rate and dropout
+//! counters instead.
 //!
 //! ## Clock semantics
 //! Durations are measured with `Instant` (CLOCK_MONOTONIC), which PAUSES

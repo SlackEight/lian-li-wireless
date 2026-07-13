@@ -61,6 +61,7 @@ pub struct Supervisor<T: UsbIo> {
     cfg: Config,
     hwmon_base: PathBuf,
     connector: Box<dyn FnMut() -> llw_protocol::Result<Dongle<T>> + Send>,
+    ipc_rx: Option<std::sync::mpsc::Receiver<crate::ipc::IpcCmd>>,
     dongle: Option<Dongle<T>>,
     link: Option<Link>,
     reliability: Reliability,
@@ -78,43 +79,15 @@ impl<T: UsbIo> Supervisor<T> {
         cfg: Config,
         hwmon_base: PathBuf,
         connector: Box<dyn FnMut() -> llw_protocol::Result<Dongle<T>> + Send>,
+        ipc_rx: Option<std::sync::mpsc::Receiver<crate::ipc::IpcCmd>>,
     ) -> Self {
         let reliability = Reliability::new(&cfg.reliability);
-        let mut curves = HashMap::new();
-        for c in &cfg.curves {
-            curves.insert(
-                c.name.clone(),
-                CurveRuntime {
-                    curve: SortedCurve::new(c.points.clone()),
-                    sensor: None, // resolved lazily in fan tick
-                    ema: Ema::new(0.3),
-                    hyst: Hysteresis::default(),
-                    last_good_read: None,
-                    pct: None,
-                },
-            );
-        }
-        let mut devices = HashMap::new();
-        for d in &cfg.devices {
-            if let Ok(mac) = crate::config::parse_mac(&d.mac) {
-                devices.insert(
-                    mac,
-                    DeviceRuntime {
-                        mac,
-                        desired: [0; 4],
-                        last_sent: None,
-                        filter: DropoutFilter::default(),
-                        expected_fx: None,
-                        last_rgb_upload: None,
-                        last_record: None,
-                    },
-                );
-            }
-        }
+        let (curves, devices) = build_runtimes(&cfg);
         Self {
             cfg,
             hwmon_base,
             connector,
+            ipc_rx,
             dongle: None,
             link: None,
             reliability,
@@ -131,6 +104,7 @@ impl<T: UsbIo> Supervisor<T> {
     /// One pass of everything due at `now`.
     pub fn step(&mut self, now: Instant) -> StepOutcome {
         let mut out = StepOutcome::default();
+        self.drain_ipc(now);
         self.ensure_connected(now);
         if self.dongle.is_none() {
             return out;
@@ -230,15 +204,15 @@ impl<T: UsbIo> Supervisor<T> {
                 );
                 self.link = Some(link);
                 self.reliability.on_acquired(now);
-                self.ingest_records(&records, now);
-                // Force immediate RGB assert + PWM send on the next ticks;
-                // also clear dropout streaks so cold start / tier1 / tier2
-                // all reset identically.
+                // Reset per-device state BEFORE ingesting the acquisition
+                // record: a carried dropout streak would otherwise emit one
+                // spurious observation from the acquisition record itself.
                 for d in self.devices.values_mut() {
                     d.expected_fx = None;
                     d.last_sent = None;
                     d.filter = DropoutFilter::default();
                 }
+                self.ingest_records(&records, now);
                 true
             }
             Ok(None) => false,
@@ -480,6 +454,155 @@ impl<T: UsbIo> Supervisor<T> {
     pub fn link(&self) -> Option<Link> {
         self.link
     }
+
+    fn drain_ipc(&mut self, _now: Instant) {
+        // Bounded drain: at most 8 requests per step keeps the control loop fair.
+        // Collect commands first to release the borrow on ipc_rx before calling answer().
+        let mut cmds = Vec::new();
+        if let Some(rx) = &self.ipc_rx {
+            for _ in 0..8 {
+                match rx.try_recv() {
+                    Ok(cmd) => cmds.push(cmd),
+                    Err(_) => break,
+                }
+            }
+        }
+        for cmd in cmds {
+            let resp = self.answer(cmd.req);
+            let _ = cmd.reply.send(resp);
+        }
+    }
+
+    fn answer(&mut self, req: crate::ipc::Request) -> crate::ipc::ResponseEnvelope {
+        use crate::ipc::{DeviceStatus, LinkStatus, Request, ResponseEnvelope, StatusData};
+        match req {
+            Request::Ping => ResponseEnvelope::ok(Some(serde_json::json!("pong"))),
+            Request::Status => {
+                let data = StatusData {
+                    daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+                    link: self.link.map(|l| LinkStatus {
+                        master_mac: mac_str(&l.master_mac),
+                        channel: l.channel,
+                    }),
+                    tx_wedged: self.tx_wedged,
+                    reliability: self.reliability.telemetry(),
+                    devices: self
+                        .devices
+                        .values()
+                        .map(|d| {
+                            let rec = d.last_record.as_ref();
+                            DeviceStatus {
+                                mac: mac_str(&d.mac),
+                                kind: rec.map_or("?".into(), |r| r.kind.display_name().into()),
+                                channel: rec.map_or(0, |r| r.channel),
+                                fan_count: rec.map_or(0, |r| r.fan_count),
+                                rpm: rec.map_or([0; 4], |r| r.fan_rpms),
+                                desired_pwm: d.desired,
+                                readback_pwm: rec.map_or([0; 4], |r| r.current_pwm),
+                                rgb_in_sync: match (d.expected_fx, rec) {
+                                    (Some(exp), Some(r)) => Some(exp == r.effect_index),
+                                    _ => None,
+                                },
+                                dropout_streak: d.filter.streak(),
+                            }
+                        })
+                        .collect(),
+                };
+                match serde_json::to_value(&data) {
+                    Ok(v) => ResponseEnvelope::ok(Some(v)),
+                    Err(e) => ResponseEnvelope::err(e.to_string()),
+                }
+            }
+            Request::GetConfig => match serde_json::to_value(&self.cfg) {
+                Ok(v) => ResponseEnvelope::ok(Some(v)),
+                Err(e) => ResponseEnvelope::err(e.to_string()),
+            },
+            Request::SetConfig { config } => match config.validate() {
+                Ok(()) => {
+                    if let Err(e) = config.save(&crate::config::default_path()) {
+                        return ResponseEnvelope::err(format!("save failed: {e}"));
+                    }
+                    self.apply_config(config);
+                    ResponseEnvelope::ok(None)
+                }
+                Err(e) => ResponseEnvelope::err(format!("invalid config: {e}")),
+            },
+            Request::SetColor { mac, rgb, brightness } => {
+                if brightness > 4 {
+                    return ResponseEnvelope::err("brightness must be 0-4");
+                }
+                let Some(dc) = self.cfg.devices.iter_mut().find(|d| d.mac == mac) else {
+                    return ResponseEnvelope::err(format!("unknown device {mac}"));
+                };
+                dc.color = Some(crate::config::StaticColor { rgb, brightness });
+                if let Err(e) = self.cfg.save(&crate::config::default_path()) {
+                    return ResponseEnvelope::err(format!("save failed: {e}"));
+                }
+                // force re-assert on next rgb_tick
+                if let Ok(m) = crate::config::parse_mac(&mac) {
+                    if let Some(dev) = self.devices.get_mut(&m) {
+                        dev.expected_fx = None;
+                        dev.last_rgb_upload = None;
+                    }
+                }
+                ResponseEnvelope::ok(None)
+            }
+        }
+    }
+
+    /// Swap in a validated config (curves/devices rebuilt; link kept).
+    fn apply_config(&mut self, cfg: Config) {
+        let (curves, devices) = build_runtimes(&cfg);
+        self.reliability = Reliability::new(&cfg.reliability);
+        self.cfg = cfg;
+        self.curves = curves;
+        self.devices = devices;
+        if self.link.is_some() {
+            self.reliability.on_acquired(Instant::now());
+        }
+    }
+}
+
+fn build_runtimes(cfg: &Config) -> (HashMap<String, CurveRuntime>, HashMap<[u8; 6], DeviceRuntime>) {
+    let mut curves = HashMap::new();
+    for c in &cfg.curves {
+        curves.insert(
+            c.name.clone(),
+            CurveRuntime {
+                curve: SortedCurve::new(c.points.clone()),
+                sensor: None, // resolved lazily in fan tick
+                ema: Ema::new(0.3),
+                hyst: Hysteresis::default(),
+                last_good_read: None,
+                pct: None,
+            },
+        );
+    }
+    let mut devices = HashMap::new();
+    for d in &cfg.devices {
+        if let Ok(mac) = crate::config::parse_mac(&d.mac) {
+            devices.insert(
+                mac,
+                DeviceRuntime {
+                    mac,
+                    desired: [0; 4],
+                    last_sent: None,
+                    filter: DropoutFilter::default(),
+                    expected_fx: None,
+                    last_rgb_upload: None,
+                    last_record: None,
+                },
+            );
+        }
+    }
+    (curves, devices)
+}
+
+fn mac_str(mac: &[u8; 6]) -> String {
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
 }
 
 fn due(last: Option<Instant>, now: Instant, interval: Duration) -> bool {
@@ -562,6 +685,7 @@ mod tests {
                 }
                 Ok(Dongle::from_parts(FakeIo::default(), Some(rx)))
             }),
+            None,
         );
         (sup, Instant::now())
     }
@@ -674,6 +798,7 @@ mod tests {
                 // later connections: dead air (empty script)
                 Ok(Dongle::from_parts(FakeIo::default(), Some(rx)))
             }),
+            None,
         );
         let t0 = Instant::now();
         let mut saw_tier1 = false;
@@ -712,6 +837,7 @@ mod tests {
                 count_in.fetch_add(1, Ordering::Relaxed);
                 Err(llw_protocol::ProtocolError::DeviceNotFound { vid: 0x0416, pid: 0x8040 })
             }),
+            None,
         );
         let t0 = Instant::now();
         // First step at t0: connector called once, wedge asserted.
@@ -771,6 +897,7 @@ mod tests {
                 }
                 Ok(Dongle::from_parts(FakeIo::default(), Some(rx)))
             }),
+            None,
         );
         (sup, Instant::now())
     }
@@ -924,6 +1051,7 @@ mod tests {
                 // Later connections: silent (no reads) — stays unacquired.
                 Ok(Dongle::from_parts(tx, Some(rx)))
             }),
+            None,
         );
         let t0 = Instant::now();
 

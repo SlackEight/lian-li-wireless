@@ -5,6 +5,10 @@
 use crate::config::Config;
 use crate::reliability::Telemetry;
 use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::mpsc;
+use tracing::{info, warn};
 
 pub const IPC_VERSION: u32 = 1;
 
@@ -80,6 +84,71 @@ pub struct DeviceStatus {
     pub dropout_streak: u32,
 }
 
+/// A request paired with its reply channel.
+pub struct IpcCmd {
+    pub req: Request,
+    pub reply: mpsc::Sender<ResponseEnvelope>,
+}
+
+/// Bind the socket and serve connections forever, forwarding parsed requests
+/// to the supervisor via `tx`. One thread per connection; one request per line.
+pub fn serve(tx: mpsc::Sender<IpcCmd>) -> anyhow::Result<()> {
+    let path = socket_path();
+    let _ = std::fs::remove_file(&path); // stale socket from a previous run
+    let listener = UnixListener::bind(&path)?;
+    info!("IPC listening on {}", path.display());
+    for stream in listener.incoming() {
+        match stream {
+            Ok(s) => {
+                let tx = tx.clone();
+                std::thread::spawn(move || handle_conn(s, tx));
+            }
+            Err(e) => warn!("IPC accept failed: {e}"),
+        }
+    }
+    Ok(())
+}
+
+fn handle_conn(stream: UnixStream, tx: mpsc::Sender<IpcCmd>) {
+    let mut reader = BufReader::new(match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    });
+    let mut writer = stream;
+    let mut line = String::new();
+    while {
+        line.clear();
+        matches!(reader.read_line(&mut line), Ok(n) if n > 0)
+    } {
+        let resp = process_line(line.trim(), &tx);
+        let Ok(json) = serde_json::to_string(&resp) else { break };
+        if writeln!(writer, "{json}").is_err() {
+            break;
+        }
+    }
+}
+
+pub(crate) fn process_line(line: &str, tx: &mpsc::Sender<IpcCmd>) -> ResponseEnvelope {
+    let env: RequestEnvelope = match serde_json::from_str(line) {
+        Ok(e) => e,
+        Err(e) => return ResponseEnvelope::err(format!("bad request: {e}")),
+    };
+    if env.v != IPC_VERSION {
+        return ResponseEnvelope::err(format!(
+            "protocol version {} unsupported (daemon speaks {IPC_VERSION}) — update llw/llw-daemon",
+            env.v
+        ));
+    }
+    let (reply_tx, reply_rx) = mpsc::channel();
+    if tx.send(IpcCmd { req: env.req, reply: reply_tx }).is_err() {
+        return ResponseEnvelope::err("daemon shutting down");
+    }
+    match reply_rx.recv_timeout(std::time::Duration::from_secs(3)) {
+        Ok(resp) => resp,
+        Err(_) => ResponseEnvelope::err("daemon busy (no reply within 3s)"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,5 +173,23 @@ mod tests {
     fn unknown_method_is_a_parse_error() {
         let line = r#"{"v":1,"method":"Frobnicate"}"#;
         assert!(serde_json::from_str::<RequestEnvelope>(line).is_err());
+    }
+
+    #[test]
+    fn process_line_version_gate_and_dispatch() {
+        let (tx, rx) = std::sync::mpsc::channel::<IpcCmd>();
+        // answer thread: reply "pong" to whatever arrives
+        std::thread::spawn(move || {
+            while let Ok(cmd) = rx.recv() {
+                let _ = cmd.reply.send(ResponseEnvelope::ok(Some(serde_json::json!("pong"))));
+            }
+        });
+        let resp = process_line(r#"{"v":1,"method":"Ping"}"#, &tx);
+        assert!(resp.ok);
+        let resp = process_line(r#"{"v":9,"method":"Ping"}"#, &tx);
+        assert!(!resp.ok);
+        assert!(resp.error.unwrap().contains("version"));
+        let resp = process_line("not json", &tx);
+        assert!(!resp.ok);
     }
 }
