@@ -451,6 +451,7 @@ impl<T: UsbIo> Supervisor<T> {
         self.link = None;
     }
 
+    #[allow(dead_code)] // future-facing: used in supervisor tests; llw status will call via IPC, not directly
     pub fn link(&self) -> Option<Link> {
         self.link
     }

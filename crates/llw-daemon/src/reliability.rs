@@ -165,6 +165,7 @@ impl Reliability {
     }
 
     /// Dropouts currently inside the window (telemetry).
+    #[allow(dead_code)] // future-facing: M3 telemetry endpoint will expose this
     pub fn recent_dropouts(&mut self, now: Instant) -> u32 {
         self.prune(now);
         self.dropouts.len() as u32

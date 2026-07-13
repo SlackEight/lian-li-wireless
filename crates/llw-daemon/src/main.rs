@@ -1,25 +1,15 @@
 //! llw-daemon — reliability daemon for Lian Li wireless devices.
-//! M2a stub: config tooling only. The supervisor loop lands in M2b.
 
-#[allow(dead_code)] // wired up in M2b Task 5
 mod acquisition;
 mod config;
-#[allow(dead_code)] // wired up in M2b Task 5
 mod observation;
-#[allow(dead_code)] // used by the M2b supervisor
 mod curve;
-#[allow(dead_code)] // used by the M2b supervisor
 mod fan;
-#[allow(dead_code)] // wired up in M2b Task 8
 mod ipc;
 mod migrate;
-#[allow(dead_code)] // used by the M2b supervisor
 mod reliability;
-#[allow(dead_code)] // used by the M2b supervisor
 mod rgb_assert;
-#[allow(dead_code)] // used by the M2b supervisor
 mod sensors;
-#[allow(dead_code)] // wired up in M2b Task 9
 mod supervisor;
 
 use anyhow::{Context as _, Result};
@@ -72,10 +62,44 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        _ => {
-            eprintln!("llw-daemon (M2a): supervisor not yet implemented.");
-            eprintln!("usage: llw-daemon --check-config | --import-lianli [path] [--force]");
+        None => run_daemon(),
+        Some(other) => {
+            eprintln!("unknown argument {other:?}");
+            eprintln!("usage: llw-daemon [--check-config | --import-lianli [path] [--force]]");
             std::process::exit(2);
         }
     }
+}
+
+fn run_daemon() -> Result<()> {
+    let path = config::default_path();
+    let cfg = config::Config::load(&path)?;
+    if cfg.devices.is_empty() {
+        tracing::warn!(
+            "no devices configured — daemon will idle; run --import-lianli or edit {}",
+            path.display()
+        );
+    }
+
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+        signal_hook::flag::register(sig, std::sync::Arc::clone(&shutdown))?;
+    }
+
+    let (ipc_tx, ipc_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if let Err(e) = ipc::serve(ipc_tx) {
+            tracing::error!("IPC server failed: {e}");
+        }
+    });
+
+    let mut sup = supervisor::Supervisor::new(
+        cfg,
+        std::path::PathBuf::from("/sys/class/hwmon"),
+        Box::new(llw_protocol::dongle::Dongle::open),
+        Some(ipc_rx),
+    );
+    sup.run(&shutdown);
+    let _ = std::fs::remove_file(ipc::socket_path());
+    Ok(())
 }

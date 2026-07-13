@@ -39,6 +39,8 @@ enum Command {
         /// Hex color, e.g. FF0000
         color: String,
     },
+    /// Show llw-daemon status
+    Status,
     /// Poll devices continuously, printing telemetry (Ctrl+C to stop)
     Watch {
         /// Poll interval in milliseconds
@@ -62,8 +64,58 @@ fn main() -> Result<()> {
         Command::Reset => reset(),
         Command::SetPwm { index, percent, hold } => set_pwm(index, percent, hold),
         Command::SetColor { index, color } => set_color(index, &color),
+        Command::Status => status(),
         Command::Watch { interval_ms, pwm } => watch(interval_ms, pwm),
     }
+}
+
+fn status() -> Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    let path = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("llw-daemon.sock");
+    let mut stream = std::os::unix::net::UnixStream::connect(&path)
+        .with_context(|| format!("connecting {} — is llw-daemon running?", path.display()))?;
+    writeln!(stream, r#"{{"v":1,"method":"Status"}}"#)?;
+    let mut line = String::new();
+    BufReader::new(stream.try_clone()?).read_line(&mut line)?;
+    let v: serde_json::Value = serde_json::from_str(&line)?;
+    if !v["ok"].as_bool().unwrap_or(false) {
+        bail!("daemon error: {}", v["error"].as_str().unwrap_or("unknown"));
+    }
+    let d = &v["data"];
+    println!("llw-daemon {}", d["daemon_version"].as_str().unwrap_or("?"));
+    match d["link"].as_object() {
+        Some(l) => println!(
+            "link: master {} channel {}",
+            l["master_mac"].as_str().unwrap_or("?"),
+            l["channel"]
+        ),
+        None => println!("link: NOT ACQUIRED"),
+    }
+    if d["tx_wedged"].as_bool().unwrap_or(false) {
+        println!("!! TX dongle missing/wedged — power-cycle may be required");
+    }
+    let r = &d["reliability"];
+    println!(
+        "reliability: dropouts={} tier1={} tier2={} streak={}",
+        r["total_dropouts"], r["total_tier1"], r["total_tier2"], r["failed_tier1_streak"]
+    );
+    for dev in d["devices"].as_array().unwrap_or(&Vec::new()) {
+        println!(
+            "  {} {} ch={} rpm={} desired={} readback={} rgb_sync={} streak={}",
+            dev["mac"].as_str().unwrap_or("?"),
+            dev["kind"].as_str().unwrap_or("?"),
+            dev["channel"],
+            dev["rpm"],
+            dev["desired_pwm"],
+            dev["readback_pwm"],
+            dev["rgb_in_sync"],
+            dev["dropout_streak"],
+        );
+    }
+    Ok(())
 }
 
 fn scan() -> Result<()> {

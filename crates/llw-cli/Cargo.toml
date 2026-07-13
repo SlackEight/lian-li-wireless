@@ -12,4 +12,5 @@ path = "src/main.rs"
 llw-protocol = { path = "../llw-protocol" }
 anyhow = { workspace = true }
 clap = { workspace = true }
+serde_json = { workspace = true }
 tracing-subscriber = { workspace = true }
