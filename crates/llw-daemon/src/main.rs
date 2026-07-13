@@ -19,6 +19,8 @@ mod reliability;
 mod rgb_assert;
 #[allow(dead_code)] // used by the M2b supervisor
 mod sensors;
+#[allow(dead_code)] // wired up in M2b Task 9
+mod supervisor;
 
 use anyhow::{Context as _, Result};
 
