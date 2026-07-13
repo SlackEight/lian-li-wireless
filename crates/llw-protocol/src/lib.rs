@@ -9,6 +9,7 @@ pub mod device_kind;
 pub mod frames;
 pub mod record;
 pub mod tinyuz;
+pub mod transport;
 
 use thiserror::Error;
 
