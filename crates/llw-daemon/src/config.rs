@@ -85,7 +85,12 @@ pub struct ControlConfig {
     pub keepalive_ms: u64,
     /// Fan % commanded when a curve's sensor has been unreadable for over a
     /// minute (never leave fans on a stale duty forever).
+    #[serde(default = "default_sensor_failsafe")]
     pub sensor_failsafe_percent: u8,
+}
+
+fn default_sensor_failsafe() -> u8 {
+    50
 }
 
 impl Default for ControlConfig {
@@ -131,9 +136,19 @@ impl Default for ReliabilityConfig {
 pub struct ObservationConfig {
     /// A dropout observation is reported for every poll at or beyond this
     /// many CONSECUTIVE all-zero-readback polls while PWM is commanded.
+    #[serde(default = "default_consecutive_polls")]
     pub consecutive_polls: u32,
     /// GetDev poll interval in ms.
+    #[serde(default = "default_poll_ms")]
     pub poll_ms: u64,
+}
+
+fn default_consecutive_polls() -> u32 {
+    2
+}
+
+fn default_poll_ms() -> u64 {
+    500
 }
 
 impl Default for ObservationConfig {
@@ -275,6 +290,25 @@ mod tests {
         );
         assert_eq!(loaded.observation.consecutive_polls, 2);
         assert_eq!(loaded.control.sensor_failsafe_percent, 50);
+    }
+
+    #[test]
+    fn pre_m2b_config_files_still_load() {
+        // shape written by the M2a importer BEFORE observation/failsafe existed
+        let old = r#"{
+            "schema_version": 1,
+            "curves": [],
+            "devices": [],
+            "control": {"tick_ms": 200, "hysteresis_temp": 1.0, "hysteresis_pwm": 5, "keepalive_ms": 1000}
+        }"#;
+        let cfg: Config = serde_json::from_str(old).unwrap();
+        assert_eq!(cfg.control.sensor_failsafe_percent, 50); // NOT 0
+        assert_eq!(cfg.observation.consecutive_polls, 2);
+        // partial observation object also tolerated
+        let partial = r#"{"schema_version": 1, "observation": {"poll_ms": 100}}"#;
+        let cfg: Config = serde_json::from_str(partial).unwrap();
+        assert_eq!(cfg.observation.poll_ms, 100);
+        assert_eq!(cfg.observation.consecutive_polls, 2);
     }
 
     #[test]
