@@ -6,6 +6,7 @@
 
 pub mod consts;
 pub mod device_kind;
+pub mod record;
 pub mod tinyuz;
 
 use thiserror::Error;
