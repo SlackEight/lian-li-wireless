@@ -199,6 +199,7 @@ pub(crate) mod tests {
     use super::*;
 
     /// Build a synthetic 42-byte record for tests.
+    #[allow(clippy::too_many_arguments)] // test fixture mirrors the 42-byte record's field list
     pub(crate) fn make_record(
         mac: [u8; 6],
         master_mac: [u8; 6],

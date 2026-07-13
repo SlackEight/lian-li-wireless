@@ -333,6 +333,6 @@ mod tests {
         let a = effect_index_from_frames(&[f0.clone(), vec![[0, 255, 0]; 4]]);
         let b = effect_index_from_frames(&[f0.clone(), vec![[0, 0, 255]; 4]]);
         assert_ne!(a, b); // animations sharing frame 0 must differ
-        assert_eq!(effect_index_from_frames(&[f0.clone()]), effect_index_from_leds(&f0));
+        assert_eq!(effect_index_from_frames(std::slice::from_ref(&f0)), effect_index_from_leds(&f0));
     }
 }
