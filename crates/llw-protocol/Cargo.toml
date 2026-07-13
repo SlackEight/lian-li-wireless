@@ -1,0 +1,14 @@
+[package]
+name = "llw-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure protocol library for Lian Li 2.4GHz wireless dongles (TX/RX) and devices"
+
+[dependencies]
+rusb = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[build-dependencies]
+cc = "1.0"
