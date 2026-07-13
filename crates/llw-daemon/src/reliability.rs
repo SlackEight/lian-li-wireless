@@ -4,12 +4,33 @@
 //! Tier 1 (re-acquire): sustained PWM dropout → re-run channel acquisition.
 //! Tier 2 (reconnect): repeated Tier-1 failure → full dongle reconnect.
 //! The daemon supervisor (M2b) executes the returned `Action`s.
+//!
+//! ## Caller contract (M2b supervisor)
+//! `poll()` COMMITS on return: a non-None Action is already recorded
+//! (cooldown stamped, counter bumped, dropout window cleared) — the caller
+//! MUST execute it. `Reacquire` MUST be followed by `on_tier1_result(ok)`
+//! on ALL paths including errors (idiom: `let ok = reacquire().is_ok();
+//! rel.on_tier1_result(ok);`), then `on_acquired(now)` on success.
+//! `Reconnect` has no result call — a failed reconnect re-escalates through
+//! fresh dropout → Tier-1-failure cycles. Failure signature to watch in
+//! telemetry: total_tier1 climbing while total_tier2 stays 0 during a
+//! persistent outage means a code path forgot on_tier1_result(false).
+//!
+//! ## Clock semantics
+//! Durations are measured with `Instant` (CLOCK_MONOTONIC), which PAUSES
+//! during system suspend: grace and cooldowns count awake time only. The
+//! supervisor must handle resume explicitly (e.g. reconnect on transport
+//! error) rather than expect this machine to notice a suspend.
+//! Note: dropouts recorded during grace are retained and can trip Tier 1 the
+//! moment grace expires if config sets window_s ≥ grace_s (moot at defaults).
 
 use crate::config::ReliabilityConfig;
+use serde::Serialize;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a non-None Action is already committed — execute it"]
 pub enum Action {
     None,
     /// Tier 1: reset + re-run scored acquisition + re-apply state.
@@ -18,6 +39,16 @@ pub enum Action {
     Reconnect,
 }
 
+/// Read-only telemetry snapshot for IPC/status surfaces.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct Telemetry {
+    pub total_dropouts: u64,
+    pub total_tier1: u64,
+    pub total_tier2: u64,
+    pub failed_tier1_streak: u32,
+}
+
+#[derive(Debug)]
 pub struct Reliability {
     cfg: Cfg,
     dropouts: VecDeque<Instant>,
@@ -25,13 +56,13 @@ pub struct Reliability {
     last_tier1: Option<Instant>,
     last_tier2: Option<Instant>,
     failed_tier1_streak: u32,
-    /// Telemetry counters (M2b exposes these over IPC).
-    pub total_dropouts: u64,
-    pub total_tier1: u64,
-    pub total_tier2: u64,
+    total_dropouts: u64,
+    total_tier1: u64,
+    total_tier2: u64,
 }
 
 /// Durations precomputed from the serializable config.
+#[derive(Debug)]
 struct Cfg {
     grace: Duration,
     dropout_threshold: u32,
@@ -121,6 +152,7 @@ impl Reliability {
 
     /// Report how the executed Tier-1 attempt went. Success resets the streak
     /// AND restarts the grace period (via on_acquired, called by the executor).
+    /// Call exactly once per executed Reacquire — double-reporting skews the streak.
     pub fn on_tier1_result(&mut self, ok: bool) {
         if ok {
             self.failed_tier1_streak = 0;
@@ -133,6 +165,15 @@ impl Reliability {
     pub fn recent_dropouts(&mut self, now: Instant) -> u32 {
         self.prune(now);
         self.dropouts.len() as u32
+    }
+
+    pub fn telemetry(&self) -> Telemetry {
+        Telemetry {
+            total_dropouts: self.total_dropouts,
+            total_tier1: self.total_tier1,
+            total_tier2: self.total_tier2,
+            failed_tier1_streak: self.failed_tier1_streak,
+        }
     }
 
     fn prune(&mut self, now: Instant) {
@@ -184,7 +225,7 @@ mod tests {
         assert_eq!(r.poll(ts(t0, 135)), Action::Reacquire);
         // immediately after: events cleared + cooldown → no refire
         assert_eq!(r.poll(ts(t0, 136)), Action::None);
-        assert_eq!(r.total_tier1, 1);
+        assert_eq!(r.telemetry().total_tier1, 1);
     }
 
     #[test]
@@ -238,7 +279,7 @@ mod tests {
         r.on_tier1_result(false);
         // streak = 2 → escalate regardless of dropout state
         assert_eq!(r.poll(ts(t0, 206)), Action::Reconnect);
-        assert_eq!(r.total_tier2, 1);
+        assert_eq!(r.telemetry().total_tier2, 1);
         // tier2 cooldown (300s) suppresses immediate repeat even if tier1 keeps failing
         r.on_tier1_result(false);
         r.on_tier1_result(false);
@@ -256,5 +297,51 @@ mod tests {
         r.on_tier1_result(false);
         r.on_tier1_result(true); // second attempt succeeded
         assert_eq!(r.poll(ts(t0, 300)), Action::None); // no escalation
+    }
+
+    #[test]
+    fn never_acquired_machine_never_fires() {
+        let t0 = Instant::now();
+        let mut r = machine();
+        // no on_acquired — dropouts before any acquisition are not meaningful
+        storm(&mut r, t0, 190, 10);
+        assert_eq!(r.poll(ts(t0, 200)), Action::None);
+    }
+
+    #[test]
+    fn healthy_after_reconnect_stays_quiet() {
+        let t0 = Instant::now();
+        let mut r = machine();
+        r.on_acquired(t0);
+        storm(&mut r, t0, 130, 5);
+        assert_eq!(r.poll(ts(t0, 135)), Action::Reacquire);
+        r.on_tier1_result(false);
+        storm(&mut r, t0, 200, 5);
+        assert_eq!(r.poll(ts(t0, 205)), Action::Reacquire);
+        r.on_tier1_result(false);
+        assert_eq!(r.poll(ts(t0, 206)), Action::Reconnect);
+        // reconnect succeeded: fresh acquisition, healthy link
+        r.on_acquired(ts(t0, 210));
+        // long after every cooldown expired, a quiet machine stays quiet
+        // (pins the streak-reset on Tier-2 fire: without it this refires)
+        assert_eq!(r.poll(ts(t0, 900)), Action::None);
+        assert_eq!(r.telemetry().total_tier2, 1);
+    }
+
+    #[test]
+    fn wide_window_config_relies_on_clear_on_fire() {
+        // window > cooldown: without the dropout clears on fire/acquire,
+        // leftover events would refire the instant cooldown+grace expire
+        let cfg = ReliabilityConfig { window_s: 300, ..Default::default() };
+        let t0 = Instant::now();
+        let mut r = Reliability::new(&cfg);
+        r.on_acquired(t0);
+        storm(&mut r, t0, 130, 5);
+        assert_eq!(r.poll(ts(t0, 135)), Action::Reacquire);
+        r.on_tier1_result(true);
+        r.on_acquired(ts(t0, 136));
+        // t=260: past grace (136+120) and cooldown (135+60); the t=130..134
+        // events are still inside the 300s window — but were cleared on fire
+        assert_eq!(r.poll(ts(t0, 260)), Action::None);
     }
 }
