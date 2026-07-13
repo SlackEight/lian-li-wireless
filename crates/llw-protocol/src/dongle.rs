@@ -4,6 +4,7 @@
 
 use crate::consts::*;
 use crate::frames::{self, RfFrame};
+use crate::io::UsbIo;
 use crate::record::{parse_getdev_response, GetDevReport};
 use crate::transport::{UsbTransport, USB_TIMEOUT};
 use crate::{ProtocolError, Result};
@@ -12,7 +13,7 @@ use std::time::Duration;
 use tracing::{debug, info};
 
 /// Master dongle identity discovered via GET_MAC.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MasterInfo {
     pub mac: [u8; 6],
     pub channel: u8,
@@ -41,9 +42,9 @@ pub fn parse_get_mac_response(response: &[u8], len: usize, channel: u8) -> Optio
 
 /// An open TX/RX dongle pair. RX is optional (telemetry only) but required
 /// for GetDev discovery.
-pub struct Dongle {
-    tx: UsbTransport,
-    rx: Option<UsbTransport>,
+pub struct Dongle<T: UsbIo = UsbTransport> {
+    tx: T,
+    rx: Option<T>,
 }
 
 /// Upstream's channel scan order: 8 first, then even 2-38, then odd 1-39.
@@ -55,7 +56,7 @@ pub fn default_channel_order() -> impl Iterator<Item = u8> {
         .chain((1..=39).filter(|&ch| ch % 2 == 1))
 }
 
-impl Dongle {
+impl Dongle<UsbTransport> {
     /// Open the TX dongle (required) and RX dongle (optional), trying V1
     /// then V2 USB IDs.
     pub fn open() -> Result<Self> {
@@ -75,6 +76,13 @@ impl Dongle {
         };
 
         Ok(Self { tx, rx })
+    }
+}
+
+impl<T: UsbIo> Dongle<T> {
+    /// Assemble a Dongle from raw parts (tests/simulations).
+    pub fn from_parts(tx: T, rx: Option<T>) -> Self {
+        Self { tx, rx }
     }
 
     pub fn has_rx(&self) -> bool {
@@ -276,6 +284,68 @@ fn open_any(ids: &[(u16, u16)]) -> Result<UsbTransport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::FakeIo;
+
+    fn getdev_response_with_one_device() -> Vec<u8> {
+        let rec = crate::record::tests::make_record(
+            [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+            [0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+            2, 3, 0, 2, [36, 36, 0, 0], [700, 700, 0, 0], [86, 86, 0, 0],
+        );
+        let mut resp = vec![0u8; 4 + 42];
+        resp[0] = 0x10;
+        resp[1] = 1;
+        resp[2] = 0x80; // mobo pwm unavailable
+        resp[4..46].copy_from_slice(&rec);
+        resp
+    }
+
+    #[test]
+    fn get_dev_via_fake_io() {
+        let rx = FakeIo::default();
+        rx.push_read(getdev_response_with_one_device());
+        let mut d = Dongle::from_parts(FakeIo::default(), Some(rx));
+        let report = d.get_dev().expect("parsed");
+        assert_eq!(report.devices.len(), 1);
+        assert_eq!(report.devices[0].fan_count, 2);
+    }
+
+    #[test]
+    fn get_dev_timeout_is_typed() {
+        let mut d = Dongle::from_parts(FakeIo::default(), Some(FakeIo::default()));
+        assert!(matches!(
+            d.get_dev(),
+            Err(crate::ProtocolError::NoResponse { op: "GetDev" })
+        ));
+    }
+
+    #[test]
+    fn get_mac_timeout_is_silent_channel() {
+        let mut d = Dongle::from_parts(FakeIo::default(), None);
+        assert_eq!(d.get_mac(5).expect("ok"), None);
+        // and the write actually went out: [0x11, channel, 0...]
+        let writes = d.tx.written();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0][0], 0x11);
+        assert_eq!(writes[0][1], 5);
+    }
+
+    #[test]
+    fn send_rf_frame_chunks_via_fake_io() {
+        let mut d = Dongle::from_parts(FakeIo::default(), None);
+        let rf = crate::frames::pwm_frame(
+            &[0xAA; 6], &[0x11; 6], 3, 2, 1, &[100, 100, 0, 0],
+        );
+        d.send_rf_frame(&rf, 2, 3).expect("sent");
+        let writes = d.tx.written();
+        assert_eq!(writes.len(), 4); // 4 USB chunks
+        for (i, w) in writes.iter().enumerate() {
+            assert_eq!(w[0], 0x10);
+            assert_eq!(w[1], i as u8);
+            assert_eq!(w[2], 2);
+            assert_eq!(w[3], 3);
+        }
+    }
 
     #[test]
     fn channel_order_matches_upstream() {

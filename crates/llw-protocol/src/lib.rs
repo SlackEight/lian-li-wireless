@@ -8,6 +8,7 @@ pub mod consts;
 pub mod device_kind;
 pub mod dongle;
 pub mod frames;
+pub mod io;
 pub mod record;
 pub mod tinyuz;
 pub mod transport;
