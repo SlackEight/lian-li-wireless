@@ -56,11 +56,11 @@ fn main() -> Result<()> {
 }
 
 fn scan() -> Result<()> {
-    let mut dongle = Dongle::open().context("opening dongles")?;
+    let mut dongle = open_dongle()?;
     println!("Surveying channels 1-39...");
     let hits = dongle.survey_channels()?;
     if hits.is_empty() {
-        println!("No master answered on any channel.");
+        println!("No master answered on any channel. (Try `llw reset` first, and check nothing else has claimed the dongles.)");
     }
     for h in &hits {
         println!(
@@ -74,7 +74,7 @@ fn scan() -> Result<()> {
 }
 
 fn devices() -> Result<()> {
-    let mut dongle = Dongle::open().context("opening dongles")?;
+    let mut dongle = open_dongle()?;
     if !dongle.has_rx() {
         bail!("RX dongle not found — cannot list devices");
     }
@@ -102,7 +102,7 @@ fn devices() -> Result<()> {
 }
 
 fn reset() -> Result<()> {
-    let mut dongle = Dongle::open().context("opening dongles")?;
+    let mut dongle = open_dongle()?;
     dongle.reset()?;
     println!("CMD_RESET sent. Master may hop channels — run `llw scan` to re-locate.");
     Ok(())
@@ -112,7 +112,7 @@ fn set_pwm(index: u8, percent: u8, hold: bool) -> Result<()> {
     if percent > 100 {
         bail!("percent must be 0-100");
     }
-    let mut dongle = Dongle::open().context("opening dongles")?;
+    let mut dongle = open_dongle()?;
     let master = dongle.discover_master().context("discovering master")?;
     println!("Master {} on channel {}", mac_str(&master.mac), master.channel);
 
@@ -139,8 +139,9 @@ fn set_pwm(index: u8, percent: u8, hold: bool) -> Result<()> {
 
 fn set_color(index: u8, color: &str) -> Result<()> {
     let rgb = parse_hex_color(color)?;
-    let mut dongle = Dongle::open().context("opening dongles")?;
+    let mut dongle = open_dongle()?;
     let master = dongle.discover_master().context("discovering master")?;
+    println!("Master {} on channel {}", mac_str(&master.mac), master.channel);
     let device = find_device(&mut dongle, index)?;
 
     let led_count = device.total_leds();
@@ -150,13 +151,20 @@ fn set_color(index: u8, color: &str) -> Result<()> {
     let frame: Vec<[u8; 3]> = vec![rgb; led_count as usize];
     let fx = dongle.upload_rgb(
         &device.mac, &master.mac, device.channel, device.rx_type,
-        &[frame], 5000, 4,
+        &[frame], 5000, 4, // interval_ms irrelevant for a 1-frame loop; 5000 matches upstream's static uploads
     )?;
     println!(
         "Static #{color} → {} ({}, {} LEDs), effect index {:02x?}",
         mac_str(&device.mac), device.kind.display_name(), led_count, fx,
     );
     Ok(())
+}
+
+fn open_dongle() -> Result<Dongle> {
+    Dongle::open().context(
+        "opening dongles (if lianli-daemon is running, stop it first: \
+         systemctl --user stop lianli-watchdog.service lianli-daemon.service)",
+    )
 }
 
 fn poll_devices(dongle: &mut Dongle) -> Result<llw_protocol::record::GetDevReport> {
