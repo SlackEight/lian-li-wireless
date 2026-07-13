@@ -39,6 +39,16 @@ enum Command {
         /// Hex color, e.g. FF0000
         color: String,
     },
+    /// Poll devices continuously, printing telemetry (Ctrl+C to stop)
+    Watch {
+        /// Poll interval in milliseconds
+        #[arg(long, default_value_t = 500)]
+        interval_ms: u64,
+        /// Also command this PWM percent to ALL devices each second
+        /// (makes dropouts observable: readback should track this value)
+        #[arg(long)]
+        pwm: Option<u8>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -52,6 +62,7 @@ fn main() -> Result<()> {
         Command::Reset => reset(),
         Command::SetPwm { index, percent, hold } => set_pwm(index, percent, hold),
         Command::SetColor { index, color } => set_color(index, &color),
+        Command::Watch { interval_ms, pwm } => watch(interval_ms, pwm),
     }
 }
 
@@ -212,4 +223,78 @@ fn mac_str(mac: &[u8; 6]) -> String {
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     )
+}
+
+fn watch(interval_ms: u64, pwm: Option<u8>) -> Result<()> {
+    if let Some(p) = pwm {
+        if p > 100 {
+            bail!("--pwm must be 0-100");
+        }
+    }
+    let mut dongle = open_dongle()?;
+    let master = dongle.discover_master().context("discovering master")?;
+    println!(
+        "Master {} on channel {} — watching every {}ms{} (Ctrl+C to stop)",
+        mac_str(&master.mac),
+        master.channel,
+        interval_ms,
+        pwm.map_or(String::new(), |p| format!(", commanding {p}% PWM")),
+    );
+
+    let mut dropouts: u64 = 0;
+    let mut polls: u64 = 0;
+    let mut last_pwm_send = std::time::Instant::now() - std::time::Duration::from_secs(2);
+    let started = std::time::Instant::now();
+
+    loop {
+        // 1Hz keepalive when commanding (best-effort: skip this second if the
+        // pre-send poll fails — the main poll below reports the error).
+        if let Some(p) = pwm {
+            if last_pwm_send.elapsed() >= std::time::Duration::from_secs(1) {
+                if let Ok(report) = dongle.get_dev() {
+                    for d in &report.devices {
+                        let raw = (p as u16 * 255 / 100) as u8;
+                        let mut target = [raw; 4];
+                        llw_protocol::frames::apply_pwm_constraints(&mut target, d.kind, d.fan_count);
+                        let rf = pwm_frame(&d.mac, &master.mac, d.rx_type, master.channel,
+                                           d.list_index + 1, &target);
+                        let _ = dongle.send_rf_frame(&rf, d.channel, d.rx_type);
+                    }
+                    last_pwm_send = std::time::Instant::now();
+                }
+            }
+        }
+
+        match dongle.get_dev() {
+            Ok(report) => {
+                polls += 1;
+                for d in &report.devices {
+                    let commanded = pwm.is_some();
+                    let dropped = commanded
+                        && d.fan_count > 0
+                        && d.current_pwm.iter().take(d.fan_count as usize).all(|&x| x == 0);
+                    if dropped {
+                        dropouts += 1;
+                    }
+                    println!(
+                        "{:>7.1}s [{}] ch={} rpm={:?} pwm={:?} fx={:02x?}{}  (polls={} dropouts={})",
+                        started.elapsed().as_secs_f32(),
+                        d.list_index,
+                        d.channel,
+                        d.fan_rpms,
+                        d.current_pwm,
+                        d.effect_index,
+                        if dropped { "  << DROPOUT" } else { "" },
+                        polls,
+                        dropouts,
+                    );
+                }
+            }
+            Err(e) => println!(
+                "{:>7.1}s poll error: {e}  (polls={polls} dropouts={dropouts})",
+                started.elapsed().as_secs_f32()
+            ),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+    }
 }
