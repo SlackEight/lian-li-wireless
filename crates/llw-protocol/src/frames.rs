@@ -6,6 +6,11 @@ use crate::device_kind::DeviceKind;
 
 pub type RfFrame = [u8; RF_DATA_SIZE];
 
+/// Maximum compressed payload `rgb_frames` can address: the packet-count
+/// byte [19] is a u8 counting data packets + 1 header, so at most 254
+/// data packets of RGB_CHUNK_LEN bytes each.
+pub const RGB_MAX_COMPRESSED: usize = 254 * RGB_CHUNK_LEN;
+
 /// Split a 240-byte RF frame into 4× 64-byte USB packets for the TX dongle.
 /// Packet layout: [0]=0x10, [1]=chunk index, [2]=channel, [3]=rx_type, [4..64]=60-byte chunk.
 pub fn usb_chunks(rf_data: &RfFrame, channel: u8, rx_type: u8) -> [[u8; 64]; RF_CHUNKS] {
@@ -56,7 +61,8 @@ pub fn master_clock_frame(master_mac: &[u8; 6]) -> RfFrame {
 }
 
 /// Build the RGB upload frame sequence for a compressed payload.
-/// Returns the header frame first (send it `header_repeats` times), then the
+/// Returns the header frame first (callers re-send it several times for RF
+/// reliability), then the
 /// data frames carrying 220-byte chunks of `compressed`.
 ///
 /// Header ([18]=0): [20..24]=compressed len u32 BE, [25..27]=frame count u16 BE,
@@ -72,6 +78,12 @@ pub fn rgb_frames(
     total_frames: u16,
     interval_ms: u16,
 ) -> Vec<RfFrame> {
+    assert!(
+        compressed.len() <= RGB_MAX_COMPRESSED,
+        "compressed RGB payload {} B exceeds protocol max {} B (254 packets)",
+        compressed.len(),
+        RGB_MAX_COMPRESSED
+    );
     let total_pk_num = compressed.len().div_ceil(RGB_CHUNK_LEN) as u8;
     let mut frames = Vec::with_capacity(total_pk_num as usize + 1);
 
@@ -218,6 +230,8 @@ mod tests {
         assert_eq!(&h[25..27], &1u16.to_be_bytes());
         assert_eq!(h[27], 44); // led count
         assert_eq!(&h[32..34], &5000u16.to_be_bytes());
+        assert_eq!(&h[28..32], &[0u8; 4][..]); // reserved, must stay zero
+        assert_eq!(&h[34..], &[0u8; 206][..]); // header padding
 
         let d1 = &frames[1];
         assert_eq!(d1[18], 1);
@@ -237,6 +251,16 @@ mod tests {
         let frames = rgb_frames(&MAC, &MASTER, &FX, &compressed, 88, 4, 100);
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0][19], 2);
+        assert_eq!(frames[0][27], 88);
+        assert_eq!(&frames[0][25..27], &4u16.to_be_bytes());
+        assert_eq!(&frames[0][32..34], &100u16.to_be_bytes());
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds protocol max")]
+    fn rgb_frames_rejects_oversized_payload() {
+        let compressed = vec![0u8; RGB_MAX_COMPRESSED + 1];
+        let _ = rgb_frames(&MAC, &MASTER, &FX, &compressed, 44, 1, 100);
     }
 
     #[test]
