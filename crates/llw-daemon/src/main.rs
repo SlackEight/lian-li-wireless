@@ -1,6 +1,8 @@
 //! llw-daemon — reliability daemon for Lian Li wireless devices.
 //! M2a stub: config tooling only. The supervisor loop lands in M2b.
 
+#[allow(dead_code)] // wired up in M2b Task 5
+mod acquisition;
 mod config;
 #[allow(dead_code)] // used by the M2b supervisor
 mod curve;
