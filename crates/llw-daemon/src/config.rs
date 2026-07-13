@@ -43,9 +43,11 @@ pub struct DeviceConfig {
     pub mac: String,
     #[serde(default)]
     pub name: Option<String>,
-    /// One entry per fan slot. RGB-only devices use an empty array.
+    /// One entry per fan slot. RGB-only devices set all four slots to 0.
     pub slots: [SlotSpeed; 4],
     /// Static color asserted (and drift-restored) by the daemon. None = leave alone.
+    /// M3 note: richer effects will arrive as a separate optional field; if both
+    /// are present, the effect takes precedence over this static color.
     #[serde(default)]
     pub color: Option<StaticColor>,
 }
@@ -126,6 +128,8 @@ pub fn default_path() -> PathBuf {
 }
 
 impl Config {
+    /// The correct constructor for any instance that will be serialized —
+    /// the derived `Default` leaves schema_version at 0, which `load` rejects.
     pub fn new() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
@@ -170,10 +174,16 @@ impl Config {
         for dev in &self.devices {
             parse_mac(&dev.mac).with_context(|| format!("device mac {:?}", dev.mac))?;
             for slot in &dev.slots {
-                if let SlotSpeed::Curve(name) = slot {
-                    if !self.curves.iter().any(|c| &c.name == name) {
-                        bail!("device {} references unknown curve {:?}", dev.mac, name);
+                match slot {
+                    SlotSpeed::Curve(name) => {
+                        if !self.curves.iter().any(|c| &c.name == name) {
+                            bail!("device {} references unknown curve {:?}", dev.mac, name);
+                        }
                     }
+                    SlotSpeed::Percent(pct) if *pct > 100 => {
+                        bail!("device {} slot percent {} out of range 0-100", dev.mac, pct);
+                    }
+                    SlotSpeed::Percent(_) => {}
                 }
             }
             if let Some(c) = &dev.color {
@@ -271,6 +281,16 @@ mod tests {
         assert_eq!(s, SlotSpeed::Percent(40));
         let s: SlotSpeed = serde_json::from_str(r#""cpu""#).unwrap();
         assert_eq!(s, SlotSpeed::Curve("cpu".into()));
+    }
+
+    #[test]
+    fn out_of_range_percent_rejected() {
+        // serde accepts any u8; validate() must catch >100
+        let s: SlotSpeed = serde_json::from_str("150").unwrap();
+        assert_eq!(s, SlotSpeed::Percent(150));
+        let mut cfg = sample();
+        cfg.devices[0].slots[0] = SlotSpeed::Percent(150);
+        assert!(cfg.validate().is_err());
     }
 
     #[test]
