@@ -1,0 +1,15 @@
+[package]
+name = "llw-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "llw"
+path = "src/main.rs"
+
+[dependencies]
+llw-protocol = { path = "../llw-protocol" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }
