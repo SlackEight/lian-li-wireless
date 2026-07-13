@@ -32,7 +32,10 @@ pub enum DeviceKind {
     Lc217,
     /// Universal Screen 8.8" LED ring (device_type 88) — 88 LEDs
     Led88,
-    /// Lancool V150 controller (device_type 66) — 88 LEDs dual-zone
+    /// Lancool V150 controller (device_type 66) — 88 LEDs dual-zone.
+    /// Unlike the LED strips, it also drives case fans (min duty 10%),
+    /// so it is deliberately NOT `is_rgb_only()`; its LEDs use the
+    /// flat-buffer `led_count_override` path like the strips do.
     V150,
     /// Unknown device kind
     Unknown,
@@ -51,6 +54,7 @@ impl DeviceKind {
         }
     }
 
+    /// Human-readable product name for UI/CLI display.
     pub fn display_name(self) -> &'static str {
         match self {
             Self::Slv3Led => "UNI FAN SL V3 Wireless",
@@ -69,6 +73,10 @@ impl DeviceKind {
         }
     }
 
+    /// LEDs per fan slot. Returns 0 for flat-buffer devices (use
+    /// `led_count_override`), and a 20-LED guess for Unknown.
+    /// For AIOs this is the per-fan-head count only — add
+    /// `pump_led_count()` for the pump head.
     pub fn leds_per_fan(self) -> u8 {
         match self {
             Self::Tlv2Lcd | Self::Tlv2Led => 26,
@@ -157,5 +165,20 @@ mod tests {
         assert_eq!(DeviceKind::from_fan_type_byte(27), DeviceKind::Tlv2Lcd);
         assert_eq!(DeviceKind::from_fan_type_byte(28), DeviceKind::Tlv2Led);
         assert_eq!(DeviceKind::from_fan_type_byte(43), DeviceKind::Unknown);
+    }
+
+    #[test]
+    fn v150_and_aio_semantics() {
+        // V150 drives fans — deliberately NOT rgb-only (matches upstream)
+        assert!(!DeviceKind::V150.is_rgb_only());
+        assert_eq!(DeviceKind::V150.led_count_override(), Some(88));
+        assert_eq!(DeviceKind::V150.min_duty_percent(), 10);
+        // AIO LED composition: 24 pump + 24 per fan head
+        assert_eq!(DeviceKind::WaterBlock.pump_led_count(), 24);
+        assert_eq!(DeviceKind::WaterBlock.leds_per_fan(), 24);
+        assert!(DeviceKind::WaterBlock.is_aio());
+        // Unknown sentinel + null slot byte
+        assert_eq!(DeviceKind::Unknown.leds_per_fan(), 20);
+        assert_eq!(DeviceKind::from_fan_type_byte(0), DeviceKind::Unknown);
     }
 }
