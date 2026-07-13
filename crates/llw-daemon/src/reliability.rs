@@ -25,7 +25,7 @@
 //! moment grace expires if config sets window_s ≥ grace_s (moot at defaults).
 
 use crate::config::ReliabilityConfig;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -40,7 +40,7 @@ pub enum Action {
 }
 
 /// Read-only telemetry snapshot for IPC/status surfaces.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Telemetry {
     pub total_dropouts: u64,
     pub total_tier1: u64,

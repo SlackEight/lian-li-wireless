@@ -6,6 +6,8 @@ mod config;
 mod curve;
 #[allow(dead_code)] // used by the M2b supervisor
 mod fan;
+#[allow(dead_code)] // wired up in M2b Task 8
+mod ipc;
 mod migrate;
 #[allow(dead_code)] // used by the M2b supervisor
 mod reliability;
