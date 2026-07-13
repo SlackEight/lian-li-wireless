@@ -1817,3 +1817,32 @@ systemctl --user start lianli-daemon.service lianli-watchdog.service
 - **Spec coverage (M2a slice):** §3.3 config (Task 2-3), §4.2 tiers (Task 7), §8 FakeTransport-style testing (Task 1), fan curves/hwmon (Tasks 4-6), static RGB re-assert building blocks (Task 8), §4.1 scored-acquisition groundwork (Tasks 9-10). Deliberately M2b: supervisor loop, acquisition implementation, IPC server, TX-wedge runtime detection, systemd/udev packaging, cutover + soak. Deliberately later: effects (M3), binding UI (M4), OpenRGB/LCD (post-v1).
 - **Types:** `SlotSpeed`/`StaticColor`/`ReliabilityConfig` defined in Task 2, consumed in Tasks 3/6/7/8 with matching names. `FakeIo` (Task 1) is what M2b's simulation tests build on. `resolve_slots` output feeds `apply_pwm_constraints` (existing llw-protocol API) — order documented in fan.rs doc comment.
 - **Known judgment calls:** `SlotSpeed` untagged serde matches upstream's config ergonomics (number or curve name); mb-sync import downgrades to 0 with a warning (mobo-sync support is a possible M2b/M3 addition — the GetDev mobo_pwm plumbing already exists in llw-protocol); `Ema` gates at 0–110 °C (upstream gates 0–100; widened slightly for hot NVMe/pump sensors, documented here); Task 9's watch subcommand contains one intentionally-flagged pseudo-call (`unwrap_or_default_report`) with explicit instructions to the implementer to write the real error-skip — flagged in-line so it cannot be pasted blindly.
+
+---
+
+## Channel-behavior experiment — results (2026-07-13)
+
+Environment: V1 dongles, SL-INF cluster (3 fans) on channel 2, `llw` @ caebed0. Production daemon stopped for the session, restored cleanly after.
+
+### Q1 — Does CMD_RESET re-roll the channel? **NO.**
+Six consecutive `llw reset` cycles: device reported `ch=2` after every one (6/6). CMD_RESET drops commanded PWM (fans revert to hardware default) but the operating channel is sticky. **This falsifies the June "Tier 0: reset makes the master hop" theory.**
+
+### Q2 — Can we steer the channel? **Not testable with the stock CLI; deferred to M2b.**
+`discover_master` (first-hit) returned channel 2 — matching the device's operating channel — in every fresh invocation this session, so PWM frames always carried the already-current channel; no divergent-channel steering stimulus was possible without a patched build. Observed along the way: full surveys still show GET_MAC answering on ALL channels 2–39 (ch 1 silent, twice), yet rapid first-hit discovery lands on the device's real channel. Working hypothesis for the June boot-lock: at master cold-boot the master transiently answers/operates on 8 (its power-on default), upstream's 8-first scan locks it in, the master later settles elsewhere, and the stale channel — not RF congestion per se — causes the dropout storm.
+
+### Q3 — Dropout rate under sustained control (channel 2)
+Two 90s runs of `llw watch --interval-ms 500 --pwm 40`:
+
+| Run | Polls | Dropouts | Pattern |
+|-----|-------|----------|---------|
+| 1 | 109 | 5 (4.6%) | burst of 3 consecutive polls (~1.5s) at t=23–25s, singles at 51.6s and 65.2s |
+| 2 | 109 | 0 | clean |
+
+All dropouts self-healed within ≤1s via the 1Hz keepalive; RPM never physically spiked (fans stayed ~870, vs ~1900 hardware default in the June sustained-loss failures).
+
+### Consequences for M2b acquisition + reliability design
+
+1. **Acquisition = read GetDev.** The device records report the network's real operating channel; GET_MAC scanning is only needed to learn the master MAC (any channel byte works). Scored channel *selection* is moot until steering is proven possible — M2b's acquisition should adopt the device-reported channel and verify link quality, not scan-and-pick.
+2. **Tier 1's trigger needs recalibration.** Run 1 (a healthy session: zero physical fan spikes) produced 5 dropouts inside a 42s span — meeting the default ≥5/60s threshold. The June failure signature was *sustained* readback loss with physical RPM reversion. M2b should distinguish transient blips (healed by next keepalive, RPM stable) from sustained loss (multiple consecutive zeroed polls AND/OR RPM at hardware default), e.g. count only dropouts persisting ≥2 consecutive polls, or raise the default threshold. The ReliabilityConfig is already tunable; the state machine is unchanged — this is a supervisor-side observation-quality question plus new defaults.
+3. **Tier 1 "re-acquire" must be redefined.** Since CMD_RESET doesn't move the channel, Tier 1 ≈ reset + rediscover + reapply state is still useful for master-state desync (the June boot case: refreshing a stale channel belief), but it is NOT a channel-escape hatch. Tier 2 (full reconnect) and — if ever needed — physical mitigations remain the deeper fallbacks.
+4. Channel 1's consistent GET_MAC silence remains unexplained (possibly reserved); harmless, worth a note in llw-protocol docs eventually.
