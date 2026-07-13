@@ -63,6 +63,7 @@ impl UsbTransport {
                 info!("{name} USB reset successful, retrying");
                 std::thread::sleep(Duration::from_millis(500));
                 // Kernel driver may re-attach after reset
+                #[allow(clippy::single_match)] // verbatim port of upstream usb.rs recovery path
                 match self.handle.kernel_driver_active(0) {
                     Ok(true) => {
                         let _ = self.handle.detach_kernel_driver(0);
@@ -111,6 +112,7 @@ impl UsbTransport {
                 if num == 0 || self.claimed.contains(&num) {
                     continue;
                 }
+                #[allow(clippy::single_match)] // verbatim port of upstream usb.rs recovery path
                 match self.handle.kernel_driver_active(num) {
                     Ok(true) => {
                         let _ = self.handle.detach_kernel_driver(num);
@@ -170,6 +172,11 @@ impl UsbTransport {
         }
     }
 
+    /// Release all claimed interfaces.
+    ///
+    /// NOTE: [`Drop`] also releases interfaces and re-attaches the kernel
+    /// driver — calling this before dropping is redundant and will produce
+    /// harmless libusb errors. Prefer letting `Drop` handle teardown.
     pub fn release(&self) {
         for &iface in self.claimed.iter().rev() {
             let _ = self.handle.release_interface(iface);
