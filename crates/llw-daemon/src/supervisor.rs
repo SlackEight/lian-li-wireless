@@ -571,4 +571,114 @@ mod tests {
         let dev = sup.devices.get(&MAC).unwrap();
         assert_eq!(dev.desired, [102, 102, 102, 0]);
     }
+
+    fn fast_reliability_config() -> Config {
+        let mut cfg = test_config();
+        cfg.reliability.grace_s = 0;
+        cfg.reliability.window_s = 60;
+        cfg.reliability.dropout_threshold = 3;
+        cfg.reliability.tier1_cooldown_s = 0;
+        cfg.observation.poll_ms = 0; // poll every step
+        cfg.control.tick_ms = 0; // fan tick every step
+        cfg
+    }
+
+    #[test]
+    fn sustained_dropout_fires_tier1_and_resyncs() {
+        let healthy = record_bytes([102, 102, 102, 0], [0; 4]);
+        let dropped = record_bytes([0, 0, 0, 0], [0; 4]);
+        // script: acquire (healthy) + 1 healthy poll, then sustained zeros,
+        // then the post-reset re-acquire read + recovery
+        let mut script = vec![getdev_resp(&[healthy]); 2];
+        script.extend(vec![getdev_resp(&[dropped]); 6]);
+        script.extend(vec![getdev_resp(&[healthy]); 4]);
+        let (mut sup, t0) = sim(fast_reliability_config(), script);
+
+        let mut tier1_fired = false;
+        for i in 0..10 {
+            let now = t0 + Duration::from_secs(i + 1);
+            let out = sup.step(now);
+            if out.tier1 {
+                tier1_fired = true;
+                break;
+            }
+        }
+        assert!(tier1_fired, "sustained readback loss must trigger Tier 1");
+        // after the tier-1 resync consumed a read, link should be back
+        assert!(sup.link().is_some());
+    }
+
+    #[test]
+    fn transient_blips_do_not_fire_tier1() {
+        let healthy = record_bytes([102, 102, 102, 0], [0; 4]);
+        let dropped = record_bytes([0, 0, 0, 0], [0; 4]);
+        // alternate: each zero-readback poll is followed by recovery —
+        // streak never reaches 2, no observations at threshold 2
+        let mut script = vec![getdev_resp(&[healthy]); 2];
+        for _ in 0..5 {
+            script.push(getdev_resp(&[dropped]));
+            script.push(getdev_resp(&[healthy]));
+        }
+        let (mut sup, t0) = sim(fast_reliability_config(), script);
+        for i in 0..12 {
+            let out = sup.step(t0 + Duration::from_secs(i + 1));
+            assert!(!out.tier1, "transient blips must not fire Tier 1 (step {i})");
+        }
+    }
+
+    #[test]
+    fn failed_tier1_escalates_to_transport_reconnect() {
+        // Script: acquire healthy, dropouts build to threshold, then the
+        // script runs DRY — tier1's post-reset re-acquire times out → tier1
+        // fails → supervisor drops the dongle and re-connects immediately
+        // (connector invoked again). This is the practical escalation path;
+        // the machine's formal Tier 2 remains a backstop.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        let connects = Arc::new(AtomicU32::new(0));
+        let connects_in = Arc::clone(&connects);
+        let mut cfg = fast_reliability_config();
+        cfg.reliability.tier2_cooldown_s = 0;
+        let healthy = record_bytes([102, 102, 102, 0], [0; 4]);
+        let dropped = record_bytes([0, 0, 0, 0], [0; 4]);
+        let mut script = vec![getdev_resp(&[healthy]); 2];
+        script.extend(vec![getdev_resp(&[dropped]); 4]);
+        let mut sup: Supervisor<FakeIo> = Supervisor::new(
+            cfg,
+            std::env::temp_dir(),
+            Box::new(move || {
+                let n = connects_in.fetch_add(1, Ordering::Relaxed);
+                let rx = FakeIo::default();
+                if n == 0 {
+                    for r in script.clone() {
+                        rx.push_read(r);
+                    }
+                }
+                // later connections: dead air (empty script)
+                Ok(Dongle::from_parts(FakeIo::default(), Some(rx)))
+            }),
+        );
+        let t0 = Instant::now();
+        let mut saw_tier1 = false;
+        for i in 0..10 {
+            let out = sup.step(t0 + Duration::from_secs(i + 1));
+            if out.tier1 {
+                saw_tier1 = true;
+                break;
+            }
+        }
+        assert!(saw_tier1, "sustained dropouts must fire Tier 1");
+        assert_eq!(connects.load(Ordering::Relaxed), 1);
+        // tier1 failed (script dry) → dongle dropped + immediate reconnect
+        // allowed: the very next step re-invokes the connector
+        let _ = sup.step(t0 + Duration::from_secs(20));
+        assert_eq!(
+            connects.load(Ordering::Relaxed),
+            2,
+            "failed tier-1 must escalate to a transport reconnect"
+        );
+        // dead air on the new dongle: stays unacquired, no panic
+        let _ = sup.step(t0 + Duration::from_secs(21));
+        assert!(sup.link().is_none());
+    }
 }
