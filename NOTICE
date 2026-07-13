@@ -1,0 +1,11 @@
+lian-li-wireless
+Copyright (c) 2026 Morgan Blem
+
+Portions of crates/llw-protocol (protocol constants, frame layouts, device
+record parsing, USB transport, tinyuz FFI wrapper and build integration) are
+ported from lian-li-linux (https://github.com/sgtaziz/lian-li-linux),
+Copyright (c) 2026 sgtaziz, MIT License.
+
+vendor/tuz_wrapper.cpp is copied from the same project.
+vendor/tinyuz and vendor/HDiffPatch are upstream libraries by sisong
+(https://github.com/sisong), MIT License, vendored as git submodules.

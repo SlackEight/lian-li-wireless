@@ -167,9 +167,7 @@ pub fn parse_getdev_response(response: &[u8], len: usize) -> Option<GetDevReport
         let off_time = (indicator & 0x7F) as u16;
         let on_time = response[3] as u16;
         let denominator = off_time + on_time;
-        if denominator > 0 {
-            report.mobo_pwm = Some((255u16 * on_time / denominator).min(255) as u8);
-        }
+        report.mobo_pwm = (255u16 * on_time).checked_div(denominator).map(|v| v.min(255) as u8);
     }
 
     let device_count = response[1] as usize;
