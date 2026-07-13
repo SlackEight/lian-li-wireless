@@ -2036,3 +2036,27 @@ Expected: tests pass; clippy warnings addressed or consciously accepted (note th
 - **Spec coverage (M1 slice):** §3.1 protocol library → Tasks 2-8; CLI proof → Task 9; M1 acceptance criteria → Task 10 steps 4-6 map 1:1. Deliberately absent (later milestones): bind/unbind (M4 Devices screen), master-clock sending loop + keepalive + recovery tiers (M2), effect rendering (M3), `send_rgb_direct` streaming path (post-v1; `rgb_frames` with 1 frame covers static).
 - **Types:** `DeviceKind` (Task 4) is referenced by `record.rs` (Task 5), `frames.rs` (Task 6), CLI (Task 9) — names match. `GetDevReport`/`DeviceRecord` consistent across Tasks 5, 8, 9. `RfFrame` alias defined Task 6, used Task 8.
 - **Known judgment calls:** the FNV-1a "abc" test vector includes an independent-verification one-liner in case the constant was transcribed wrong; `poll_devices` retries 5× because GetDev timeouts are empirically sporadic; `seq_index = index + 1` in `set-pwm` mirrors upstream's position-among-bound-devices semantics and is correct for single-master setups.
+
+---
+
+## M1 hardware validation — 2026-07-13
+
+Environment: owner's machine, V1 dongles (TX `0416:8040` bus7, RX `0416:8041` bus7), `lianli-daemon` + watchdog stopped for the session and restarted cleanly afterwards. Binary: `target/release/llw` @ ae14f8c.
+
+| Step | Result |
+|------|--------|
+| 1. Dongle takeover | PASS — both dongles enumerated, no TX wedge |
+| 2. `llw scan` | PASS — master `e5:ba:f0:72:ab:3c` fw=16 answered on **every channel 2–39** (only ch 1 silent); ~20s survey |
+| 3. `llw devices` | PASS — SL-INF cluster `02:8b:51:62:32:e1` (3 fans, ch=2, rx=1) with live RPM/PWM/fx telemetry. Strimer absent (see note) |
+| 4. `llw set-pwm 0 60 --hold` (20s) | PASS — raw 153 to slots [153,153,153,0]; RPM fell 2193→~1700, audibly confirmed; reverted to hardware default (~2200) after hold ended, as expected without keepalive |
+| 5. `llw set-color 0 FF0000` | PASS — 132 LEDs, 396B raw → 13B compressed, 2 RF frames; all three rings solid steady red; firmware echoed effect index `af:c0:e0:21` in GetDev **6s after zero traffic** = onboard storage confirmed |
+| 6. Strimer color | **DEFERRED** — Strimer Wireless owned but not yet physically installed; absence from discovery is correct behavior. The code path is identical to step 5 (same `upload_rgb`); run `llw devices` + `llw set-color <idx> 8800FF` once installed to close this out |
+| 7. Daemon restore | PASS — daemon reacquired dongles, resumed PWM 86 within 8s |
+
+### Anomalies / M2-relevant observations
+
+- **GET_MAC answers on all channels (2–39).** The master responds to the channel-scan query on essentially every channel, so "first responder" carries no information — upstream's ordering (8 first) alone explains the boot-time channel-8 lock-in. M2's scored acquisition (response-quality bursts per candidate, spec §4.1) is therefore not just better but *necessary*; mere GET_MAC response cannot discriminate channels. Channel 1's silence is a curiosity worth re-checking during M2.
+- PWM readback dropped to `[0,0,0,0]` within seconds of the hold ending — the documented no-keepalive dropout, reconfirmed; M2's 1s keepalive + drift detection owns this.
+- GetDev polls were reliable throughout (no retries observed in any invocation this session).
+
+**M1 acceptance: PASSED** (fan PWM + fan static color on real hardware; Strimer deferred pending physical install — protocol-identical path validated).
