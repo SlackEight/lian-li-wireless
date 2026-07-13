@@ -10,6 +10,8 @@ mod migrate;
 #[allow(dead_code)] // used by the M2b supervisor
 mod reliability;
 #[allow(dead_code)] // used by the M2b supervisor
+mod rgb_assert;
+#[allow(dead_code)] // used by the M2b supervisor
 mod sensors;
 
 use anyhow::{Context as _, Result};
