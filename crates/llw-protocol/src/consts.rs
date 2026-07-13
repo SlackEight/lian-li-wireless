@@ -22,7 +22,8 @@ pub const RF_DATA_SIZE: usize = 240;
 pub const RF_CHUNK_SIZE: usize = 60;
 pub const RF_CHUNKS: usize = RF_DATA_SIZE / RF_CHUNK_SIZE;
 
-/// Max compressed-RGB payload bytes per RF data packet.
+/// Max compressed-RGB payload bytes per RF data packet
+/// (240-byte frame minus the 20-byte RGB packet header).
 pub const RGB_CHUNK_LEN: usize = 220;
 
 const fn cmd64(b0: u8, b1: u8, b2: u8, b3: u8) -> [u8; 64] {
