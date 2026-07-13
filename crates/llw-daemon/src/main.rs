@@ -2,6 +2,7 @@
 //! M2a stub: config tooling only. The supervisor loop lands in M2b.
 
 mod config;
+mod migrate;
 
 use anyhow::Result;
 
@@ -23,9 +24,36 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Some("--import-lianli") => {
+            let src = args.get(2).map(std::path::PathBuf::from).unwrap_or_else(|| {
+                config::default_path()
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join("lianli")
+                    .join("config.json")
+            });
+            let dst = config::default_path();
+            if dst.exists() && args.iter().all(|a| a != "--force") {
+                anyhow::bail!("{} already exists (use --force to overwrite)", dst.display());
+            }
+            let report = migrate::import(&src)?;
+            for w in &report.warnings {
+                eprintln!("warning: {w}");
+            }
+            report.config.save(&dst)?;
+            println!(
+                "Imported {} curve(s), {} device(s) → {}",
+                report.config.curves.len(),
+                report.config.devices.len(),
+                dst.display()
+            );
+            Ok(())
+        }
         _ => {
             eprintln!("llw-daemon (M2a): supervisor not yet implemented.");
-            eprintln!("usage: llw-daemon --check-config");
+            eprintln!("usage: llw-daemon --check-config | --import-lianli [path] [--force]");
             std::process::exit(2);
         }
     }

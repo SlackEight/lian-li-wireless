@@ -158,7 +158,6 @@ impl Config {
         Ok(cfg)
     }
 
-    #[allow(dead_code)]
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
