@@ -4,7 +4,7 @@
 mod config;
 mod migrate;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -42,6 +42,9 @@ fn main() -> Result<()> {
             for w in &report.warnings {
                 eprintln!("warning: {w}");
             }
+            report.config
+                .validate()
+                .context("imported config failed validation — fix the source config or file a bug")?;
             report.config.save(&dst)?;
             println!(
                 "Imported {} curve(s), {} device(s) → {}",

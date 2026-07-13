@@ -1,5 +1,4 @@
 //! One-shot import from lianli-daemon's config (~/.config/lianli/config.json).
-//! Loose parsing on purpose: we read a foreign schema and take what we support.
 
 use crate::config::{
     Config, Curve, DeviceConfig, SensorSpec, SlotSpeed, StaticColor, SCHEMA_VERSION,
@@ -20,6 +19,7 @@ pub fn import(path: &Path) -> Result<ImportReport> {
     Ok(import_value(&v))
 }
 
+/// Loose parsing on purpose: we read a foreign schema and take what we support.
 pub fn import_value(v: &Value) -> ImportReport {
     let mut warnings = Vec::new();
     let mut cfg = Config::new();
@@ -28,15 +28,17 @@ pub fn import_value(v: &Value) -> ImportReport {
     // Curves: keep name + points; map temp_command → native hwmon by best effort.
     for c in v["fan_curves"].as_array().unwrap_or(&Vec::new()) {
         let name = c["name"].as_str().unwrap_or("imported").to_string();
-        let points: Vec<(f32, f32)> = c["curve"]
-            .as_array()
-            .unwrap_or(&Vec::new())
-            .iter()
-            .filter_map(|p| {
-                let pair = p.as_array()?;
-                Some((pair.first()?.as_f64()? as f32, pair.get(1)?.as_f64()? as f32))
-            })
-            .collect();
+        let raw_points = c["curve"].as_array().cloned().unwrap_or_default();
+        let points: Vec<(f32, f32)> = raw_points.iter().filter_map(|p| {
+            let pair = p.as_array()?;
+            Some((pair.first()?.as_f64()? as f32, pair.get(1)?.as_f64()? as f32))
+        }).collect();
+        if points.len() != raw_points.len() {
+            warnings.push(format!(
+                "curve {name:?}: skipped {} non-numeric point(s)",
+                raw_points.len() - points.len()
+            ));
+        }
         let cmd = c["temp_command"].as_str().unwrap_or("");
         let sensor = sensor_from_temp_command(cmd, &mut warnings, &name);
         cfg.curves.push(Curve { name, sensor, points });
@@ -49,6 +51,9 @@ pub fn import_value(v: &Value) -> ImportReport {
             warnings.push(format!("skipping non-wireless device {device_id:?}"));
             continue;
         };
+        if g["speeds"].as_array().map_or(0, |a| a.len()) > 4 {
+            warnings.push(format!("{mac}: lianli config has more than 4 speed slots; extras ignored"));
+        }
         let mut slots = [
             SlotSpeed::Percent(0),
             SlotSpeed::Percent(0),
@@ -83,7 +88,7 @@ pub fn import_value(v: &Value) -> ImportReport {
         cfg.control.hysteresis_temp = t as f32;
     }
     if let Some(p) = v["fans"]["hysteresis_pwm"].as_u64() {
-        cfg.control.hysteresis_pwm = p as u8;
+        cfg.control.hysteresis_pwm = p.min(255) as u8;
     }
 
     ImportReport { config: cfg, warnings }
@@ -112,7 +117,14 @@ fn sensor_from_temp_command(cmd: &str, warnings: &mut Vec<String>, curve: &str) 
 fn extract_static_color(v: &Value, device_id: &str, warnings: &mut Vec<String>) -> Option<StaticColor> {
     let devices = v["rgb"]["devices"].as_array()?;
     let dev = devices.iter().find(|d| d["device_id"].as_str() == Some(device_id))?;
-    let zone = dev["zones"].as_array()?.first()?;
+    let zones = dev["zones"].as_array()?;
+    if zones.len() > 1 {
+        warnings.push(format!(
+            "{device_id}: {} RGB zones in lianli config; only zone 0 imported (multi-zone arrives with M3 effects)",
+            zones.len()
+        ));
+    }
+    let zone = zones.first()?;
     let effect = &zone["effect"];
     let mode = effect["mode"].as_str().unwrap_or("");
     if mode != "Direct" && mode != "Static" {
@@ -211,5 +223,16 @@ mod tests {
         let report = import_value(&v);
         assert!(report.config.devices.is_empty());
         assert_eq!(report.warnings.len(), 1);
+    }
+
+    #[test]
+    fn dangling_curve_reference_fails_validation() {
+        let v: Value = serde_json::from_str(
+            r#"{"fans":{"speeds":[{"device_id":"wireless:aa:bb:cc:dd:ee:ff","speeds":["ghost",0,0,0]}]}}"#,
+        )
+        .unwrap();
+        let report = import_value(&v);
+        // importer produces the reference; validation is the gate that catches it
+        assert!(report.config.validate().is_err());
     }
 }
