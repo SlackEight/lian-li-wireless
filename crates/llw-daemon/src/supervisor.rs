@@ -139,6 +139,9 @@ impl<T: UsbIo> Supervisor<T> {
             if self.link.is_none() {
                 return out;
             }
+            // Force PWM/RGB re-apply on the next ticks; skip polling this step
+            // to let the re-sync settle.
+            return out;
         }
         if due(self.last_poll, now, Duration::from_millis(self.cfg.observation.poll_ms)) {
             self.last_poll = Some(now);
@@ -680,5 +683,55 @@ mod tests {
         // dead air on the new dongle: stays unacquired, no panic
         let _ = sup.step(t0 + Duration::from_secs(21));
         assert!(sup.link().is_none());
+    }
+
+    #[test]
+    fn connector_failure_marks_wedge_and_backs_off() {
+        let mut _calls = 0u32;
+        let mut sup: Supervisor<FakeIo> = Supervisor::new(
+            test_config(),
+            std::env::temp_dir(),
+            Box::new(move || {
+                _calls += 1;
+                Err(llw_protocol::ProtocolError::DeviceNotFound { vid: 0x0416, pid: 0x8040 })
+            }),
+        );
+        let t0 = Instant::now();
+        let out = sup.step(t0);
+        assert_eq!(out, StepOutcome::default());
+        assert!(sup.tx_wedged);
+        // within the 10s reconnect interval: no second open attempt happens
+        // (observable: tx_wedged stays true and step stays inert)
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        assert!(sup.tx_wedged);
+        // after the interval, retries continue quietly
+        let _ = sup.step(t0 + Duration::from_secs(11));
+        assert!(sup.tx_wedged);
+    }
+
+    #[test]
+    fn rgb_drift_triggers_reupload_with_cooldown() {
+        // device reports a FOREIGN effect index after our upload → re-upload,
+        // but not more than once per cooldown window
+        let foreign_fx = [0xd9, 0x2c, 0xb8, 0x51];
+        let rec_foreign = record_bytes([102, 102, 102, 0], foreign_fx);
+        let script = vec![getdev_resp(&[rec_foreign]); 12];
+        let mut cfg = test_config();
+        cfg.observation.poll_ms = 0;
+        cfg.control.tick_ms = 0;
+        let (mut sup, t0) = sim(cfg, script);
+
+        let out = sup.step(t0);
+        assert!(out.acquired);
+        // first rgb_tick uploads (expected_fx was None)
+        let out = sup.step(t0 + Duration::from_secs(1));
+        assert_eq!(out.uploaded_rgb, 1);
+        // device keeps reporting the foreign index → drift detected, but
+        // cooldown (5s) suppresses immediate re-upload
+        let out = sup.step(t0 + Duration::from_secs(2));
+        assert_eq!(out.uploaded_rgb, 0);
+        // past cooldown → re-upload happens
+        let out = sup.step(t0 + Duration::from_secs(7));
+        assert_eq!(out.uploaded_rgb, 1);
     }
 }
