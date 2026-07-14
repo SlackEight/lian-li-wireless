@@ -189,3 +189,15 @@ The M1-deferred experiment: find the firmware's animation storage ceiling per fa
 **Task 8 (flash probe, Rainbow @ 132 LEDs):** 32/64/96 frames PASS; 112/128 FAIL (firmware wipes fx to all-zero — fails safe, drift-detectable). Ceiling ≈ 38-44KB RAW (likely 40KB); protocol max (55.8KB compressed) is NOT the binding limit. Budget decision: byte-based — RAW_BYTE_BUDGET = 28,000 (≈75% of measured floor), frames = min(96, budget/(leds×3)), floor 8. → 132 LEDs: 70 frames; 174-LED Strimer: 53 frames.
 
 **Bonus observation (CORRECTED):** during the probe session, `discover_master` (GET_MAC first-hit) reported channel 2 while GetDev device records — the ground truth — stayed on channel 8 throughout. No hop occurred: this is further evidence that GET_MAC responses carry no operating-channel information, reinforcing the GetDev-only acquisition design.
+
+---
+
+## M3 gate — CLOSED (2026-07-14 afternoon)
+
+**Protocol discovery (session's biggest find): the firmware needs RF SILENCE during its flash commit.** Multi-frame uploads from the daemon never stuck (infinite 5s drift-retry) while identical payloads with 3s post-upload quiet always passed. Fix: 3s post-upload settle window in the supervisor (suppresses polls/PWM/heartbeat; commit d679b59). After the fix: single upload, first-try stick, every time. This likely explains why upstream's PR #93 only tested modest frame counts.
+
+**Layout + budget landed** (d041297, 0862593, 11ee61d): byte-based frame budget (70 frames @ 132 LEDs); SL-INF 5-segment layout map — Rainbow seamless ("seamless and smooth" — owner), radial Ripple with inner radius hardware-tuned 0.4→0.7 ("that's the one" — owner).
+
+**Visual verdicts (owner, on hardware):** Ripple ✓ (radial, tuned), Rainbow ✓ (seamless post-layout-map), Meteor ✓ (also served as the wiring probe), Runway ✓ ("looks sick"), Breathing ✓, Static ✓ (since M2). Color-cycle + RainbowMorph uploaded clean (rgb_sync) but not eyeballed — same verified engine.
+
+**Gate: Ripple + ≥5 effects running onboard on SL-INF — MET.** Deferred: Strimer validation (hardware not yet installed — one `llw set-effect <idx> ripple` when it is); the remaining L-Connect catalog is M5 scope; per-fan ripple phase + tuning knobs are M4-UI territory.
