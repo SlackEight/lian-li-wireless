@@ -3,7 +3,15 @@
   "identifier": "dev.slackeight.llw",
   "build": {
     "frontendDist": "ui/dist",
-    "devUrl": "http://localhost:5173"
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": {
+      "cwd": "ui",
+      "script": "npm run dev"
+    },
+    "beforeBuildCommand": {
+      "cwd": "ui",
+      "script": "npm run build"
+    }
   },
   "app": {
     "withGlobalTauri": false,

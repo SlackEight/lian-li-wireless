@@ -6,7 +6,7 @@ license.workspace = true
 build = "build.rs"
 
 [dependencies]
-tauri = { version = "2", default-features = true }
+tauri = { version = "2", default-features = true , features = [] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
