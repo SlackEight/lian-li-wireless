@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
+const AIR_EXPIRY: Duration = Duration::from_secs(30);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const RGB_REUPLOAD_COOLDOWN: Duration = Duration::from_secs(5);
 /// After a successful RGB upload the supervisor holds RF traffic (GetDev polls,
@@ -39,6 +40,34 @@ const RGB_REUPLOAD_COOLDOWN: Duration = Duration::from_secs(5);
 const RGB_SETTLE: Duration = Duration::from_secs(3);
 /// Failsafe engages when a sensor has been unreadable this long — or immediately if it has never produced a reading.
 const SENSOR_FAILSAFE_AFTER: Duration = Duration::from_secs(60);
+
+/// Bond classification for a device seen on the air.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Bond {
+    /// Bound to our master (master_mac == link.master_mac).
+    Ours,
+    /// Bound to a different master (all-nonzero master_mac != ours).
+    Foreign,
+    /// Not bound to any master (master_mac == [0;6]).
+    Unbound,
+}
+
+impl Bond {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Bond::Ours => "Ours",
+            Bond::Foreign => "Foreign",
+            Bond::Unbound => "Unbound",
+        }
+    }
+}
+
+/// An entry in the air inventory: a device recently seen via GetDev.
+pub struct AirEntry {
+    pub record: DeviceRecord,
+    pub last_seen: Instant,
+    pub bond: Bond,
+}
 
 /// What a step did — simulation tests assert on this.
 #[derive(Debug, Default, PartialEq)]
@@ -91,6 +120,9 @@ pub struct Supervisor<T: UsbIo> {
     /// firmware's flash-commit window the RF silence it needs.
     rgb_settle_until: Option<Instant>,
     pub tx_wedged: bool,
+    /// Air inventory: every device seen on the air, keyed by MAC. Entries
+    /// are updated on every ingest and pruned after 30s of silence.
+    pub air: HashMap<[u8; 6], AirEntry>,
 }
 
 impl<T: UsbIo> Supervisor<T> {
@@ -118,6 +150,7 @@ impl<T: UsbIo> Supervisor<T> {
             last_heartbeat: None,
             rgb_settle_until: None,
             tx_wedged: false,
+            air: HashMap::new(),
         }
     }
 
@@ -268,11 +301,31 @@ impl<T: UsbIo> Supervisor<T> {
         };
         let records = report.devices;
         self.ingest_records(&records, now);
+        // Prune air entries that haven't been seen for >30s.
+        self.air.retain(|_, entry| now.duration_since(entry.last_seen) < AIR_EXPIRY);
     }
 
     fn ingest_records(&mut self, records: &[DeviceRecord], now: Instant) {
         let threshold = self.cfg.observation.consecutive_polls;
+        // Classify bond based on the link we hold (if any).
+        let our_master = self.link.map(|l| l.master_mac);
         for rec in records {
+            // Update air inventory for EVERY record, regardless of config.
+            let bond = classify_bond(rec, our_master.as_ref());
+            self.air
+                .entry(rec.mac)
+                .and_modify(|e| {
+                    e.record = rec.clone();
+                    e.last_seen = now;
+                    e.bond = bond.clone();
+                })
+                .or_insert_with(|| AirEntry {
+                    record: rec.clone(),
+                    last_seen: now,
+                    bond: bond.clone(),
+                });
+
+            // Configured-device flow: unchanged.
             let Some(dev) = self.devices.get_mut(&rec.mac) else { continue };
             let commanded = dev
                 .desired
@@ -526,10 +579,11 @@ impl<T: UsbIo> Supervisor<T> {
     }
 
     fn answer(&mut self, req: crate::ipc::Request) -> crate::ipc::ResponseEnvelope {
-        use crate::ipc::{DeviceStatus, LinkStatus, Request, ResponseEnvelope, StatusData};
+        use crate::ipc::{AirDeviceStatus, DeviceStatus, LinkStatus, Request, ResponseEnvelope, StatusData};
         match req {
             Request::Ping => ResponseEnvelope::ok(Some(serde_json::json!("pong"))),
             Request::Status => {
+                let now = Instant::now();
                 let data = StatusData {
                     daemon_version: env!("CARGO_PKG_VERSION").to_string(),
                     link: self.link.map(|l| LinkStatus {
@@ -557,6 +611,19 @@ impl<T: UsbIo> Supervisor<T> {
                                 },
                                 dropout_streak: d.filter.streak(),
                             }
+                        })
+                        .collect(),
+                    air: self
+                        .air
+                        .values()
+                        .map(|e| AirDeviceStatus {
+                            mac: mac_str(&e.record.mac),
+                            kind: e.record.kind.display_name().into(),
+                            bond: e.bond.as_str().to_string(),
+                            channel: e.record.channel,
+                            fan_count: e.record.fan_count,
+                            rpm: e.record.fan_rpms,
+                            last_seen_s: now.duration_since(e.last_seen).as_secs(),
                         })
                         .collect(),
                 };
@@ -638,6 +705,20 @@ impl<T: UsbIo> Supervisor<T> {
         if self.link.is_some() {
             self.reliability.on_acquired(Instant::now());
         }
+    }
+}
+
+/// Classify a device record's bond based on our current master MAC.
+/// - `our_master == None` (no link yet): classify conservatively.
+///   All-zero master → Unbound; nonzero → Foreign (we don't know our MAC yet).
+fn classify_bond(rec: &DeviceRecord, our_master: Option<&[u8; 6]>) -> Bond {
+    let zero_master = rec.master_mac == [0u8; 6];
+    if zero_master {
+        return Bond::Unbound;
+    }
+    match our_master {
+        Some(m) if &rec.master_mac == m => Bond::Ours,
+        _ => Bond::Foreign,
     }
 }
 
@@ -1353,5 +1434,178 @@ mod tests {
             out.sent_pwm > 0 || out.sent_heartbeat,
             "PWM or heartbeat must resume after settle window (T+3500ms)"
         );
+    }
+
+    // ── Air inventory tests ───────────────────────────────────────────────────
+
+    /// Build a 42-byte record with a custom MAC and master_mac for air tests.
+    fn air_record_bytes(mac: [u8; 6], master: [u8; 6], pwm: [u8; 4]) -> [u8; 42] {
+        let mut r = [0u8; 42];
+        r[0..6].copy_from_slice(&mac);
+        r[6..12].copy_from_slice(&master);
+        r[12] = 2;   // channel
+        r[13] = 1;   // rx_type
+        r[19] = 3;   // fan_count
+        r[20..24].copy_from_slice(&[0u8; 4]);
+        r[24] = 36;  // SL-INF fan type
+        r[36..40].copy_from_slice(&pwm);
+        r[41] = 0x1C;
+        r
+    }
+
+    /// Build a GetDev response with multiple arbitrary records.
+    fn getdev_resp_multi(records: &[[u8; 42]]) -> Vec<u8> {
+        let mut resp = vec![0u8; 4 + 42 * records.len()];
+        resp[0] = 0x10;
+        resp[1] = records.len() as u8;
+        resp[2] = 0x80;
+        for (i, r) in records.iter().enumerate() {
+            resp[4 + i * 42..4 + (i + 1) * 42].copy_from_slice(r);
+        }
+        resp
+    }
+
+    /// Air inventory: foreign + unbound records alongside the configured SL-INF.
+    ///
+    /// After acquisition + one poll the air inventory must contain exactly 3 entries:
+    /// - configured SL-INF (MAC) → Ours
+    /// - a foreign device       → Foreign
+    /// - an unbound device      → Unbound
+    #[test]
+    fn air_inventory_classifies_ours_foreign_unbound() {
+        let foreign_mac: [u8; 6] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01];
+        let unbound_mac: [u8; 6] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02];
+        let foreign_master: [u8; 6] = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01];
+        let zero_master: [u8; 6] = [0u8; 6];
+
+        // Records: configured SL-INF (MASTER), a foreign device (foreign_master), an unbound device (zero master)
+        let rec_ours = air_record_bytes(MAC, MASTER, [102, 102, 102, 0]);
+        let rec_foreign = air_record_bytes(foreign_mac, foreign_master, [80; 4]);
+        let rec_unbound = air_record_bytes(unbound_mac, zero_master, [0; 4]);
+
+        let mut cfg = test_config();
+        cfg.observation.poll_ms = 0;
+        cfg.control.tick_ms = 10_000;
+        cfg.control.keepalive_ms = 10_000;
+
+        // Script: acquire (all three records) + one poll step (same records)
+        let combined = getdev_resp_multi(&[rec_ours, rec_foreign, rec_unbound]);
+        let script = vec![combined; 3];
+        let (mut sup, t0) = sim(cfg, script);
+
+        // Step 1: acquire
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+        // Air is updated during acquisition ingest too
+        assert_eq!(sup.air.len(), 3, "air must have 3 entries after acquisition");
+
+        // Step 2: poll step
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        assert_eq!(sup.air.len(), 3, "air must still have 3 entries after poll");
+
+        // Validate bond classifications
+        let ours_entry = sup.air.get(&MAC).expect("configured device must be in air");
+        assert_eq!(ours_entry.bond, Bond::Ours, "configured SL-INF must be Ours");
+
+        let foreign_entry = sup.air.get(&foreign_mac).expect("foreign device must be in air");
+        assert_eq!(foreign_entry.bond, Bond::Foreign, "device with different master must be Foreign");
+
+        let unbound_entry = sup.air.get(&unbound_mac).expect("unbound device must be in air");
+        assert_eq!(unbound_entry.bond, Bond::Unbound, "device with zero master must be Unbound");
+    }
+
+    /// Air inventory expiry: an entry that stops appearing must be pruned after 30s.
+    ///
+    /// Script: acquire + a few polls with the foreign device → then polls without
+    /// it → 30s later the entry is gone.
+    ///
+    /// Uses a color-free config to avoid the RGB settle window suppressing polls
+    /// (settle window would prevent poll_devices from running and defer expiry).
+    #[test]
+    fn air_inventory_expires_unseen_entries() {
+        let foreign_mac: [u8; 6] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01];
+        let foreign_master: [u8; 6] = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01];
+
+        let rec_ours = air_record_bytes(MAC, MASTER, [0; 4]);
+        let rec_foreign = air_record_bytes(foreign_mac, foreign_master, [0; 4]);
+
+        // No color → no RGB upload → no RGB settle window suppressing polls.
+        let mut cfg = Config::new();
+        cfg.devices.push(crate::config::DeviceConfig {
+            mac: "02:8b:51:62:32:e1".into(),
+            name: None,
+            slots: [
+                crate::config::SlotSpeed::Percent(0),
+                crate::config::SlotSpeed::Percent(0),
+                crate::config::SlotSpeed::Percent(0),
+                crate::config::SlotSpeed::Percent(0),
+            ],
+            color: None,
+            effect: None,
+        });
+        cfg.observation.poll_ms = 0;  // poll every step
+        cfg.control.tick_ms = 10_000; // suppress fan tick
+        cfg.control.keepalive_ms = 10_000; // suppress keepalive
+
+        // Script:
+        //   1 × both devices (acquisition)
+        //   2 × both devices (polls while foreign is visible)
+        //   10 × only our device (foreign gone from air)
+        let with_foreign = getdev_resp_multi(&[rec_ours, rec_foreign]);
+        let without_foreign = getdev_resp_multi(&[rec_ours]);
+        let mut script = vec![with_foreign; 3];
+        script.extend(vec![without_foreign; 10]);
+        let (mut sup, t0) = sim(cfg, script);
+
+        // Acquire at t0 (consumes script[0] = with_foreign)
+        let out = sup.step(t0);
+        assert!(out.acquired);
+        assert_eq!(sup.air.len(), 2, "both devices on air at acquisition");
+
+        // Step at +1s: poll with both (consumes script[1] = with_foreign)
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        // Step at +2s: poll with both — foreign last_seen = t0+2s (consumes script[2] = with_foreign)
+        let t_last_foreign = t0 + Duration::from_secs(2);
+        let _ = sup.step(t_last_foreign);
+        assert_eq!(sup.air.len(), 2, "both entries after last foreign poll");
+
+        // Step at +3s: poll WITHOUT foreign — foreign still in air (< 30s)
+        // (consumes script[3] = first without_foreign)
+        let _ = sup.step(t0 + Duration::from_secs(3));
+        assert_eq!(sup.air.len(), 2, "foreign still in air at +1s after last seen");
+
+        // Step at t_last_foreign + 31s = t0+33s: foreign must be pruned
+        // (consumes script[4] = second without_foreign; prune runs with 31s elapsed)
+        let t_expired = t_last_foreign + Duration::from_secs(31);
+        let _ = sup.step(t_expired);
+        assert_eq!(sup.air.len(), 1, "foreign entry must expire after 30s unseen");
+        assert!(sup.air.contains_key(&MAC), "configured device must remain");
+        assert!(!sup.air.contains_key(&foreign_mac), "foreign device must be pruned");
+    }
+
+    /// Configured-device (Ours) flow is byte-identical: existing sim still green
+    /// when air entries are present. This verifies no regression via the
+    /// healthy_loop_acquires_and_commands semantics with air inventory active.
+    #[test]
+    fn air_inventory_ours_flow_unchanged() {
+        let rec = record_bytes([0; 4], [0; 4]);
+        let script = vec![getdev_resp(&[rec]); 6];
+        let (mut sup, t0) = sim(test_config(), script);
+
+        let out = sup.step(t0);
+        assert!(out.acquired);
+        assert_eq!(sup.air.len(), 1, "configured device must appear in air");
+
+        let out = sup.step(t0 + Duration::from_millis(1100));
+        assert!(out.polled);
+        assert_eq!(out.sent_pwm, 1, "PWM send must be unchanged");
+
+        // The configured device in air must be Ours
+        let entry = sup.air.get(&MAC).expect("configured device in air");
+        assert_eq!(entry.bond, Bond::Ours, "configured device must be Ours in air");
+
+        // The device runtime must have last_record set (existing behaviour)
+        let dev = sup.devices.get(&MAC).unwrap();
+        assert!(dev.last_record.is_some(), "last_record must still be updated");
     }
 }

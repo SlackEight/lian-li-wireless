@@ -64,6 +64,21 @@ pub struct StatusData {
     pub tx_wedged: bool,
     pub reliability: Telemetry,
     pub devices: Vec<DeviceStatus>,
+    pub air: Vec<AirDeviceStatus>,
+}
+
+/// A device visible on the air (from the air inventory), including both
+/// configured (Ours) and unconfigured (Foreign/Unbound) devices.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AirDeviceStatus {
+    pub mac: String,
+    pub kind: String,
+    /// Bond classification: "Ours", "Foreign", or "Unbound"
+    pub bond: String,
+    pub channel: u8,
+    pub fan_count: u8,
+    pub rpm: [u16; 4],
+    pub last_seen_s: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

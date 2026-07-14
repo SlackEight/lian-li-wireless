@@ -162,6 +162,26 @@ fn status() -> Result<()> {
             dev["dropout_streak"],
         );
     }
+    // "on air:" section: non-Ours entries from the air inventory.
+    let empty_air = Vec::new();
+    let air: Vec<&serde_json::Value> = d["air"]
+        .as_array()
+        .unwrap_or(&empty_air)
+        .iter()
+        .filter(|e| e["bond"].as_str().unwrap_or("") != "Ours")
+        .collect();
+    if !air.is_empty() {
+        println!("on air:");
+        for e in &air {
+            println!(
+                "  {} {} {} ch={}",
+                e["bond"].as_str().unwrap_or("?"),
+                e["mac"].as_str().unwrap_or("?"),
+                e["kind"].as_str().unwrap_or("?"),
+                e["channel"],
+            );
+        }
+    }
     Ok(())
 }
 
