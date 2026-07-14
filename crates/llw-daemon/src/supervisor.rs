@@ -25,10 +25,6 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const RGB_REUPLOAD_COOLDOWN: Duration = Duration::from_secs(5);
 /// Failsafe engages when a sensor has been unreadable this long — or immediately if it has never produced a reading.
 const SENSOR_FAILSAFE_AFTER: Duration = Duration::from_secs(60);
-/// Conservative frame budget for effect animations before the flash-size probe (Task 8).
-/// Task 8 measures the firmware's animation storage ceiling and raises this value
-/// to ~75% of the measured frame ceiling (or keeps 24 if the ceiling is ≤32 frames).
-const FRAME_BUDGET: u16 = 24;
 
 /// What a step did — simulation tests assert on this.
 #[derive(Debug, Default, PartialEq)]
@@ -385,7 +381,8 @@ impl<T: UsbIo> Supervisor<T> {
             let upload_payload: Option<(Vec<Vec<[u8; 3]>>, u16)> =
                 if let Some(spec) = &dc.effect {
                     // Effect path: compile via bridge; fall through to color on None.
-                    effects_bridge::compile(spec, &rec, FRAME_BUDGET)
+                    // Frame budget is data-driven from the Task 8 flash probe (byte-based).
+                    effects_bridge::compile(spec, &rec, effects_bridge::frame_budget(rec.total_leds()))
                         .or_else(|| {
                             dc.color.map(|color| {
                                 (vec![rgb_assert::static_frame(&rec, &color)], 5000)
@@ -1236,7 +1233,10 @@ mod tests {
             brightness: 4,
         };
 
-        let (frames, interval_ms) = effects_bridge::compile(&spec, &rec, FRAME_BUDGET)
+        // Pass explicit 24 so the golden expectations stay valid; the supervisor
+        // now calls frame_budget(rec.total_leds()) = 70 for 132 LEDs, but this
+        // test exercises the compile path, not the budget formula.
+        let (frames, interval_ms) = effects_bridge::compile(&spec, &rec, 24)
             .expect("SL-INF 3-fan ripple must compile");
 
         // 24 frames, each 132 LEDs — this is what the supervisor passes to upload_rgb.
@@ -1255,7 +1255,7 @@ mod tests {
             ripple_frame_count > static_frame_count,
             "ripple must produce more frames than static (got {ripple_frame_count} vs {static_frame_count})"
         );
-        // The 24-frame animation is what gets uploaded — assert it's genuinely multi-frame.
-        assert!(ripple_frame_count >= 24, "ripple must be at least 24 frames (FRAME_BUDGET)");
+        // The 24-frame animation is genuinely multi-frame.
+        assert!(ripple_frame_count >= 24, "ripple must be at least 24 frames");
     }
 }
