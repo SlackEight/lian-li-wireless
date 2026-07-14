@@ -1742,3 +1742,11 @@ Expected: link acquired on the device-reported channel; fans at curve PWM within
 Rollback at any point: `systemctl --user disable --now llw-daemon && systemctl --user unmask lianli-daemon && systemctl --user enable --now lianli-daemon lianli-watchdog`
 
 Repo published: https://github.com/SlackEight/lian-li-wireless (public, 2026-07-14)
+
+### Cold-boot test — result (2026-07-14, 08:06 boot)
+
+**PASS, with the June scenario reproduced live and self-healed.** The master cold-booted onto channel 8 (confirming the boot-lock hypothesis — its power-on default), and the early-boot RF environment produced a genuine dropout storm (~199 observations in the first ~8 min, Tier-1 resyncs at t+132s and t+252s exactly per grace/cooldown design, each re-acquiring in ~700ms). Throughout, the 1s keepalive held fans near target — no June-style sawtooth, brief surges only. The storm then decayed on its own (~1 dropout/min by t+10min; zero Tier-1s since), fans rock-steady at PWM 86 / ~734 RPM, rgb_sync=true. **Zero manual intervention** — the June failure that previously persisted for hours until a manual restart self-stabilized in under ten minutes.
+
+Timing: daemon active 12.4s into userspace (39s total boot, firmware+loader = 21s of it); dongle→link→RGB in under 600ms. The audible "hard minute" ≈ BIOS/boot hardware-default window + early storm surges.
+
+Soak watch-items: (a) if a future boot's channel-8 storm does NOT decay, the deferred channel-steering question (experiment Q2) becomes priority follow-up; (b) Tier-1 fired twice without changing the channel (as expected — sticky) and without harm (~700ms each); consider whether resync-on-storm earns its keep vs pure keepalive riding, once soak data accumulates.
