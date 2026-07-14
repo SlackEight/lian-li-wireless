@@ -1,80 +1,70 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import './lib/theme.css';
+  import { type Section } from './lib/sections.js';
+  import Sidebar from './lib/components/Sidebar.svelte';
+  import DaemonBanner from './lib/components/DaemonBanner.svelte';
+  import Health from './lib/sections/Health.svelte';
+  import Devices from './lib/sections/Devices.svelte';
+  import Lighting from './lib/sections/Lighting.svelte';
+  import Cooling from './lib/sections/Cooling.svelte';
 
-  let pingReply = $state<string | null>(null);
-  let pingError = $state<string | null>(null);
+  // Active section state — Svelte 5 runes
+  let active = $state<Section>('Health');
 
-  async function doPing() {
-    try {
-      pingReply = await invoke<string>("ping");
-      pingError = null;
-    } catch (e) {
-      pingError = String(e);
-      pingReply = null;
-    }
+  // Daemon banner — wired to live data in Task 4
+  const daemonUnreachable = false;
+
+  function selectSection(s: Section) {
+    active = s;
   }
-
-  $effect(() => {
-    doPing();
-  });
 </script>
 
-<main>
-  <h1 class="wordmark">llw</h1>
-  {#if pingReply !== null}
-    <p class="reply">{pingReply}</p>
-  {:else if pingError !== null}
-    <p class="reply error">{pingError}</p>
-  {:else}
-    <p class="reply muted">…</p>
-  {/if}
-</main>
+<div class="shell">
+  <Sidebar {active} onSelect={selectSection} />
+
+  <div class="main-column">
+    <DaemonBanner visible={daemonUnreachable} />
+
+    <main class="content" class:dimmed={daemonUnreachable}>
+      {#if active === 'Health'}
+        <Health />
+      {:else if active === 'Devices'}
+        <Devices />
+      {:else if active === 'Lighting'}
+        <Lighting />
+      {:else if active === 'Cooling'}
+        <Cooling />
+      {/if}
+    </main>
+  </div>
+</div>
 
 <style>
-  :global(*, *::before, *::after) {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
-  }
-
-  :global(html, body) {
-    width: 100%;
-    height: 100%;
-    background: #0b0b0f;
-    color: #f2f2f5;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial,
-      sans-serif;
-  }
-
-  main {
-    width: 100%;
+  .shell {
+    display: flex;
+    width: 100vw;
     height: 100vh;
+    overflow: hidden;
+    background: var(--bg);
+  }
+
+  .main-column {
+    flex: 1;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 0.75rem;
-    background: #0b0b0f;
+    overflow: hidden;
+    min-width: 0;
   }
 
-  .wordmark {
-    font-size: 2.5rem;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    color: #f2f2f5;
+  .content {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--s-6);
+    transition: opacity 200ms ease;
   }
 
-  .reply {
-    font-size: 0.875rem;
-    color: #6e6e78;
-    letter-spacing: 0.04em;
-  }
-
-  .reply.error {
-    color: #e57373;
-  }
-
-  .reply.muted {
+  .content.dimmed {
     opacity: 0.5;
+    pointer-events: none;
   }
 </style>

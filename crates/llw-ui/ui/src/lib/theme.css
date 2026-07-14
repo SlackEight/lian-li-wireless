@@ -1,0 +1,124 @@
+/* Nocturne Charged — design tokens */
+
+:root {
+  /* ── Palette ── */
+  --bg:        #0b0b0f;
+  --surface:   #141419;
+  --surface-2: #17171d;
+  --hairline:  rgba(255, 255, 255, 0.07);
+
+  /* Text */
+  --text:      #f2f2f5;
+  --text-dim:  #a9a9b3;
+  --text-muted:#6e6e78;
+
+  /* State */
+  --ok:        #7ee2a8;
+  --warn:      #e8a84b;
+  --danger:    #e06060;
+
+  /* Accent (the ONLY saturated colour — active pill only) */
+  --accent:         rgba(120, 60, 255, 0.15);
+  --accent-text:    #c9adff;
+  --accent-border:  rgba(150, 90, 255, 0.45);
+
+  /* Wordmark dot */
+  --dot-glow: rgba(120, 60, 255, 0.7);
+
+  /* ── Spacing scale ── */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-6: 24px;
+
+  /* ── Radii ── */
+  --r-card:    14px;
+  --r-control: 8px;
+  --r-chip:    20px;
+
+  /* ── Typography ── */
+  --font: -apple-system, 'Segoe UI', system-ui, sans-serif;
+  --font-size-base: 14px;
+
+  /* ── Bloom ── */
+  --bloom-size: 18px;
+  --glow-color: rgba(110, 40, 255, 0.55);
+
+  /* ── Sidebar ── */
+  --sidebar-width: 200px;
+}
+
+/* ── Reset ── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--font-size-base);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--surface);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* ── Focus ring ── */
+:focus-visible {
+  outline: 2px solid rgba(150, 90, 255, 0.5);
+  outline-offset: 2px;
+  border-radius: var(--r-control);
+}
+
+/* ── Bloom utilities ── */
+
+/* Use --glow-color on the element or locally override it */
+.bloom {
+  box-shadow: 0 0 var(--bloom-size) var(--glow-color);
+}
+
+/* A card/chip with a tinted hairline border + soft outer shadow */
+.bloom-border {
+  border: 1px solid rgba(150, 90, 255, 0.25);
+  box-shadow:
+    0 0 24px rgba(90, 30, 220, 0.10),
+    inset 0 0 0 1px rgba(150, 90, 255, 0.08);
+}
+
+/* Surface card base */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-card);
+  padding: var(--s-4);
+}
+
+/* Muted hairline card (for placeholder content) */
+.card-muted {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-card);
+  padding: var(--s-4);
+  color: var(--text-muted);
+  font-size: 13px;
+}
