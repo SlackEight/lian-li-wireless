@@ -1,0 +1,250 @@
+/* Component styles — plain global CSS, one class namespace per component.
+   Nocturne Charged tokens come from theme.css. */
+
+/* ── Sidebar ── */
+.sidebar {
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-width);
+  height: 100%;
+  background: var(--surface);
+  border-right: 1px solid var(--hairline);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: var(--s-6) var(--s-3);
+  flex-shrink: 0;
+}
+
+.wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 var(--s-2);
+  margin-bottom: var(--s-6);
+  user-select: none;
+}
+
+.wordmark-text {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.04em;
+}
+
+/* The one charged accent: a tiny purple glow dot */
+.wordmark-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(150, 90, 255, 0.9);
+  box-shadow:
+    0 0 6px rgba(120, 60, 255, 0.8),
+    0 0 14px rgba(80, 20, 220, 0.4);
+  margin-bottom: 1px; /* sits slightly above baseline */
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-control);
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-family: var(--font);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background 120ms ease,
+    color 120ms ease;
+  width: 100%;
+}
+
+.nav-item:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.nav-item.active {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 500;
+}
+
+.nav-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+}
+
+.nav-label {
+  flex: 1;
+}
+
+/* ── Daemon banner ── */
+.daemon-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-6);
+  background: rgba(232, 168, 75, 0.1);
+  border-bottom: 1px solid rgba(232, 168, 75, 0.2);
+  font-size: 12px;
+  color: var(--warn);
+  animation: slide-down 200ms ease;
+}
+
+@keyframes slide-down {
+  from { transform: translateY(-100%); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+
+.banner-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+  animation: pulse 1.8s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
+
+.banner-text {
+  font-family: var(--font);
+  letter-spacing: 0.01em;
+}
+
+/* ── Sections (shared) ── */
+.section-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+
+.section-header {
+  margin-bottom: var(--s-2);
+}
+
+.section-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+.section-subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-top: var(--s-1);
+}
+
+.placeholder-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+
+/* ── Lighting placeholder silhouette ── */
+.placeholder-shell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-3);
+  padding: 48px var(--s-6);
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-card);
+  opacity: 0.45;
+  filter: blur(0.4px);
+  pointer-events: none;
+  user-select: none;
+}
+
+.fan-ring-wrap {
+  position: relative;
+  width: 96px;
+  height: 96px;
+}
+
+.fan-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+}
+
+.fan-ring.outer {
+  background: conic-gradient(
+    from 200deg,
+    #0000ff 0%,
+    #8800ff 30%,
+    #141419 55%,
+    #0000ff 100%
+  );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fan-ring.inner {
+  position: relative;
+  inset: auto;
+  width: 62px;
+  height: 62px;
+  background: var(--surface);
+  border-radius: 50%;
+}
+
+.fan-ring-glow {
+  position: absolute;
+  inset: -8px;
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse at center,
+    rgba(100, 30, 255, 0.3) 0%,
+    transparent 70%
+  );
+}
+
+.coming-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.coming-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  max-width: 220px;
+}
+
+/* ── Cooling placeholder ── */
+.curve-svg {
+  width: 200px;
+  height: 80px;
+}

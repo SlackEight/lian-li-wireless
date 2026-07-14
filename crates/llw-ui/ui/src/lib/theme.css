@@ -122,3 +122,29 @@ html, body {
   color: var(--text-muted);
   font-size: 13px;
 }
+
+/* ── App shell layout (singleton) ── */
+.shell {
+  display: flex;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg);
+}
+.main-column {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--s-6);
+  transition: opacity 200ms ease;
+}
+.content.dimmed {
+  opacity: 0.5;
+  pointer-events: none;
+}

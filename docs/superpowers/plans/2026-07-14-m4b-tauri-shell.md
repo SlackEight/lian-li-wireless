@@ -75,3 +75,9 @@
 ## Task 1 Wayland smoke — PASSED (2026-07-14 night, with one quirk)
 
 First launch crashed: `Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display` — webkit2gtk's DMABUF renderer vs NVIDIA on Wayland. Fix: `WEBKIT_DISABLE_DMABUF_RENDERER=1`, now set programmatically in main.rs (Wayland-only, respects user override). Also fixed: scaffold missed beforeDevCommand (Vite wasn't auto-started). With both fixes the window opens and renders correctly on KDE Plasma 6 Wayland — owner confirmed ("I see llw and pong"). Decorations/scaling: no issues reported.
+
+## Task 2 — post-mortem + framework switch to React (2026-07-14 night)
+
+Owner glance FAILED on first pass: sidebar didn't reach the bottom, Health rendered below it. Diagnosis (headless-chromium screenshots + curl): in dev mode, vite-plugin-svelte served the **raw .svelte source as App.svelte's CSS module** (`?svelte&type=style&lang.css` returned the file verbatim), so the shell's scoped styles were dropped — production builds were unaffected. Reproduced on both vite 6 + plugin 5 and vite 8 + plugin 7. Trigger: importing `theme.css` from inside App.svelte's `<script>` block; moving the import to the entry file fixed dev rendering (verified by screenshot).
+
+The owner then asked (twice) for a mainstream framework. Decision: **switch the frontend to React 19 + Vite 7** while the surface is small (shell + placeholders, one logic module, 6 tests). Port kept everything byte-comparable: theme.css untouched, component styles consolidated verbatim into `src/lib/components.css`, markup to TSX, sections.ts/tests unchanged. Verified: `npm run build` + `vitest` 6/6 + `tsc --noEmit` green; dev-server screenshot pixel-matches the intended shell. All remaining M4 tasks build on React.

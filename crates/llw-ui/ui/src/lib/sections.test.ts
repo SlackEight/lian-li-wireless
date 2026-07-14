@@ -33,7 +33,7 @@ describe('sections module', () => {
   });
 
   it('simulates section switching state logic', () => {
-    // Simulates what App.svelte does: switching active section
+    // Simulates what App does: switching active section
     let active: Section = 'Health';
 
     function select(s: Section) {

@@ -1750,3 +1750,11 @@ Repo published: https://github.com/SlackEight/lian-li-wireless (public, 2026-07-
 Timing: daemon active 12.4s into userspace (39s total boot, firmware+loader = 21s of it); dongle→link→RGB in under 600ms. The audible "hard minute" ≈ BIOS/boot hardware-default window + early storm surges.
 
 Soak watch-items: (a) if a future boot's channel-8 storm does NOT decay, the deferred channel-steering question (experiment Q2) becomes priority follow-up; (b) Tier-1 fired twice without changing the channel (as expected — sticky) and without harm (~700ms each); consider whether resync-on-storm earns its keep vs pure keepalive riding, once soak data accumulates.
+
+### Soak incident — external interference from lianli-gui (2026-07-14 evening)
+
+Owner reported the June symptom back: fans full-tilt ~1s every ~15s. **Not a daemon defect — external interference.** `lianli-gui` (the retired lianli-linux GUI) had been session-restored by Plasma at login (we masked the daemon+watchdog units in the cutover but the GUI isn't a systemd service). From ~20:21 it was talking directly to the TX dongle: our GetDev reads came back `0xff` (reconnect storms), the master's PWM state kept getting wiped (readback zeros, `dropout_streak` 41, fans reverting to full-tilt default), 220+ dropouts and 5 Tier-1s accumulated. Killing pid 1946 stopped it **instantly**: readback snapped to [85,85,85], RPM to ~820, and 90 monitored seconds passed with zero new dropouts.
+
+Fix: `ksmserverrc` `[General] excludeApps=lianli-gui` — Plasma will never session-restore it again (package stays installed as the rollback path). Note for the soak gate: the daemon behaved correctly under active interference (kept healing, no wedge, no manual intervention); this window should be discounted from dropout statistics, not counted against the gate.
+
+Daemon improvement noted (not urgent): a GetDev `0xff` response is protocol-level garbage, not a USB failure — treating it as a transport error causes reconnect churn under interference. Candidate: count it as a dropped poll first, reconnect only on repeats.
