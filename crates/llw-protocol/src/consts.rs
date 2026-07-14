@@ -15,6 +15,8 @@ pub const RF_SELECT: u8 = 0x12;
 pub const RF_PWM_CMD: u8 = 0x10;
 pub const RF_MASTER_CLOCK: u8 = 0x14;
 pub const RF_SET_RGB: u8 = 0x20;
+/// Persists the current bind table to device flash (upstream save_rf_config).
+pub const RF_SAVE_CONFIG: u8 = 0x15;
 
 /// RF frame geometry: 240-byte frames sent as 4× 60-byte chunks
 /// inside 64-byte USB packets.

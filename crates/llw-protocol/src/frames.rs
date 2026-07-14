@@ -49,6 +49,52 @@ pub fn pwm_frame(
     rf
 }
 
+/// Build a bind (or unbind) command frame.
+///
+/// The bind command reuses the PWM frame layout (`rf[0]=0x12, rf[1]=0x10`)
+/// with re-addressed fields (upstream bind.rs `send_bind_packet`):
+/// - `rf[2..8]`  = device_mac (the device being bound)
+/// - `rf[8..14]` = target_master (our master MAC when binding; zeros when unbinding)
+/// - `rf[14]`    = target_rx (the RX endpoint to assign)
+/// - `rf[15]`    = master_channel
+/// - `rf[16]`    = target_rx again — the seq byte carries the target endpoint here
+/// - `rf[17..21]`= device's CURRENT reported PWM (keeps fans steady during handover)
+///
+/// Unbind: pass `target_master = &[0u8;6]`, `target_rx = 0`.
+/// The frame must be sent 6× with 30ms gaps (see dongle::send_bind_burst).
+pub fn bind_frame(
+    device_mac: &[u8; 6],
+    target_master: &[u8; 6],
+    target_rx: u8,
+    master_channel: u8,
+    current_pwm: &[u8; 4],
+) -> RfFrame {
+    // Delegate to pwm_frame with seq_index = target_rx (upstream field reuse).
+    pwm_frame(device_mac, target_master, target_rx, master_channel, target_rx, current_pwm)
+}
+
+/// Build a SaveConfig frame to persist bind-table changes to device flash.
+///
+/// Layout (upstream `save_rf_config`):
+/// - `rf[0]`     = 0x12 (RF_SELECT)
+/// - `rf[1]`     = 0x15 (RF_SAVE_CONFIG)
+/// - `rf[2..8]`  = `0xFF×6` (broadcast destination)
+/// - `rf[8..14]` = master_mac
+/// - `rf[14]`    = 0xFF
+/// - `rf[15..]`  = zero (unused)
+///
+/// The caller must send this as 4 USB chunks with `packet[2]=master_ch,
+/// packet[3]=0xFF`, the whole 4-chunk set repeated 3× with 200ms gaps.
+pub fn save_config_frame(master_mac: &[u8; 6]) -> RfFrame {
+    let mut rf = [0u8; RF_DATA_SIZE];
+    rf[0] = RF_SELECT;
+    rf[1] = RF_SAVE_CONFIG;
+    rf[2..8].copy_from_slice(&[0xFF; 6]);
+    rf[8..14].copy_from_slice(master_mac);
+    rf[14] = 0xFF;
+    rf
+}
+
 /// Build the 1Hz master-clock heartbeat frame (broadcast, rx_type 0xFF at the
 /// USB layer). The 220-byte cpu-info field is left zero — firmware only needs
 /// the heartbeat itself.
@@ -217,6 +263,76 @@ mod tests {
         assert_eq!(rf[16], 1); // seq
         assert_eq!(&rf[17..21], &[100, 100, 0, 0]);
         assert_eq!(&rf[21..], &[0u8; 219][..]); // padding untouched
+    }
+
+    #[test]
+    fn bind_frame_full_layout() {
+        // device_mac=MAC, target_master=MASTER, target_rx=7, master_channel=3,
+        // current_pwm=[200,180,160,0]
+        let device_mac: [u8; 6] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
+        let target_master: [u8; 6] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        let target_rx: u8 = 7;
+        let master_ch: u8 = 3;
+        let pwm: [u8; 4] = [200, 180, 160, 0];
+
+        let rf = bind_frame(&device_mac, &target_master, target_rx, master_ch, &pwm);
+
+        // Command bytes
+        assert_eq!(rf[0], 0x12, "rf[0] must be RF_SELECT");
+        assert_eq!(rf[1], 0x10, "rf[1] must be RF_PWM_CMD");
+        // Device MAC at rf[2..8]
+        assert_eq!(&rf[2..8], &device_mac);
+        // Target master MAC at rf[8..14]
+        assert_eq!(&rf[8..14], &target_master);
+        // target_rx at rf[14]
+        assert_eq!(rf[14], 7, "rf[14] must be target_rx");
+        // master_channel at rf[15]
+        assert_eq!(rf[15], 3, "rf[15] must be master_channel");
+        // seq byte carries target_rx (upstream field reuse)
+        assert_eq!(rf[16], 7, "rf[16] (seq) must equal target_rx per upstream");
+        // current PWM at rf[17..21]
+        assert_eq!(&rf[17..21], &[200u8, 180, 160, 0]);
+        // remaining bytes are zero
+        assert_eq!(&rf[21..], &[0u8; 219][..]);
+    }
+
+    #[test]
+    fn bind_frame_unbind_variant() {
+        // Unbind: zero master, rx 0
+        let device_mac: [u8; 6] = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02];
+        let zero_master: [u8; 6] = [0u8; 6];
+        let pwm: [u8; 4] = [128, 128, 0, 0];
+
+        let rf = bind_frame(&device_mac, &zero_master, 0, 5, &pwm);
+
+        assert_eq!(rf[0], 0x12);
+        assert_eq!(rf[1], 0x10);
+        assert_eq!(&rf[2..8], &device_mac);
+        assert_eq!(&rf[8..14], &[0u8; 6], "unbind: master field must be zeros");
+        assert_eq!(rf[14], 0, "unbind: target_rx must be 0");
+        assert_eq!(rf[15], 5, "master_channel preserved");
+        assert_eq!(rf[16], 0, "unbind: seq (=target_rx) must be 0");
+        assert_eq!(&rf[17..21], &[128u8, 128, 0, 0]);
+        assert_eq!(&rf[21..], &[0u8; 219][..]);
+    }
+
+    #[test]
+    fn save_config_frame_full_layout() {
+        let master_mac: [u8; 6] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+
+        let rf = save_config_frame(&master_mac);
+
+        // Command bytes
+        assert_eq!(rf[0], 0x12, "rf[0] must be RF_SELECT");
+        assert_eq!(rf[1], 0x15, "rf[1] must be RF_SAVE_CONFIG (0x15)");
+        // Broadcast destination
+        assert_eq!(&rf[2..8], &[0xFFu8; 6], "rf[2..8] must be 0xFF×6");
+        // Master MAC
+        assert_eq!(&rf[8..14], &master_mac);
+        // rx field 0xFF
+        assert_eq!(rf[14], 0xFF, "rf[14] must be 0xFF");
+        // Everything after rf[14] is zero
+        assert_eq!(&rf[15..], &[0u8; 225][..], "rf[15..] must be zero (unused)");
     }
 
     #[test]
