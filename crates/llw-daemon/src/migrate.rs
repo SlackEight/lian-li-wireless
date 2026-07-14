@@ -77,7 +77,7 @@ pub fn import_value(v: &Value) -> ImportReport {
             };
         }
         let color = extract_static_color(v, device_id, &mut warnings);
-        cfg.devices.push(DeviceConfig { mac: mac.to_string(), name: None, slots, color });
+        cfg.devices.push(DeviceConfig { mac: mac.to_string(), name: None, slots, color, effect: None });
     }
 
     // Control parameters.

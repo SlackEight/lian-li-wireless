@@ -46,7 +46,7 @@ mod tests {
     use crate::config::DeviceConfig;
 
     fn dev(slots: [SlotSpeed; 4]) -> DeviceConfig {
-        DeviceConfig { mac: "02:8b:51:62:32:e1".into(), name: None, slots, color: None }
+        DeviceConfig { mac: "02:8b:51:62:32:e1".into(), name: None, slots, color: None, effect: None }
     }
 
     #[test]

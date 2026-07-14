@@ -2,6 +2,7 @@
 
 mod acquisition;
 mod config;
+mod effects_bridge;
 mod observation;
 mod curve;
 mod fan;

@@ -232,6 +232,7 @@ name = "llw-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "llw-effects",
  "llw-protocol",
  "serde",
  "serde_json",

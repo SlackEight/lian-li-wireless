@@ -48,10 +48,13 @@ pub struct DeviceConfig {
     /// One entry per fan slot. RGB-only devices set all four slots to 0.
     pub slots: [SlotSpeed; 4],
     /// Static color asserted (and drift-restored) by the daemon. None = leave alone.
-    /// M3 note: richer effects will arrive as a separate optional field; if both
-    /// are present, the effect takes precedence over this static color.
+    /// If both `effect` and `color` are present, `effect` takes precedence.
     #[serde(default)]
     pub color: Option<StaticColor>,
+    /// Animated effect spec (M3). When present, overrides `color`. Speed must be
+    /// 1..=5 (0 is invalid), brightness ≤4, palette ≤8 entries.
+    #[serde(default)]
+    pub effect: Option<llw_effects::EffectSpec>,
 }
 
 /// Untagged: a number is a constant speed %, a string names a curve. 0 = off.
@@ -229,6 +232,26 @@ impl Config {
                     bail!("device {} brightness {} out of range 0-4", dev.mac, c.brightness);
                 }
             }
+            if let Some(eff) = &dev.effect {
+                if eff.speed == 0 || eff.speed > 5 {
+                    bail!(
+                        "device {} effect speed {} out of range 1-5",
+                        dev.mac, eff.speed
+                    );
+                }
+                if eff.brightness > 4 {
+                    bail!(
+                        "device {} effect brightness {} out of range 0-4",
+                        dev.mac, eff.brightness
+                    );
+                }
+                if eff.colors.len() > 8 {
+                    bail!(
+                        "device {} effect palette has {} entries (max 8)",
+                        dev.mac, eff.colors.len()
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -270,6 +293,7 @@ mod tests {
                 SlotSpeed::Percent(0),
             ],
             color: Some(StaticColor { rgb: [255, 255, 255], brightness: 4 }),
+            effect: None,
         });
         cfg
     }
@@ -360,5 +384,113 @@ mod tests {
         );
         assert!(parse_mac("02:8b:51").is_err());
         assert!(parse_mac("zz:8b:51:62:32:e1").is_err());
+    }
+
+    #[test]
+    fn effect_roundtrip() {
+        use llw_effects::{Direction, EffectKind, EffectSpec};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = Config::new();
+        cfg.devices.push(DeviceConfig {
+            mac: "02:8b:51:62:32:e1".into(),
+            name: None,
+            slots: [SlotSpeed::Percent(0), SlotSpeed::Percent(0), SlotSpeed::Percent(0), SlotSpeed::Percent(0)],
+            color: None,
+            effect: Some(EffectSpec {
+                kind: EffectKind::Ripple,
+                colors: vec![[0, 0, 255], [136, 0, 255]],
+                speed: 3,
+                direction: Direction::Forward,
+                brightness: 4,
+            }),
+        });
+        cfg.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        let eff = loaded.devices[0].effect.as_ref().unwrap();
+        assert_eq!(eff.kind, EffectKind::Ripple);
+        assert_eq!(eff.speed, 3);
+        assert_eq!(eff.brightness, 4);
+        assert_eq!(eff.colors, vec![[0u8, 0, 255], [136, 0, 255]]);
+    }
+
+    #[test]
+    fn effect_validation_rejects_speed_zero() {
+        use llw_effects::{Direction, EffectKind, EffectSpec};
+        let mut cfg = Config::new();
+        cfg.devices.push(DeviceConfig {
+            mac: "02:8b:51:62:32:e1".into(),
+            name: None,
+            slots: [SlotSpeed::Percent(0), SlotSpeed::Percent(0), SlotSpeed::Percent(0), SlotSpeed::Percent(0)],
+            color: None,
+            effect: Some(EffectSpec {
+                kind: EffectKind::Ripple,
+                colors: vec![],
+                speed: 0, // invalid
+                direction: Direction::Forward,
+                brightness: 4,
+            }),
+        });
+        assert!(cfg.validate().is_err(), "speed 0 must be rejected");
+    }
+
+    #[test]
+    fn effect_validation_rejects_speed_out_of_range() {
+        use llw_effects::{Direction, EffectKind, EffectSpec};
+        let mut cfg = Config::new();
+        cfg.devices.push(DeviceConfig {
+            mac: "02:8b:51:62:32:e1".into(),
+            name: None,
+            slots: [SlotSpeed::Percent(0), SlotSpeed::Percent(0), SlotSpeed::Percent(0), SlotSpeed::Percent(0)],
+            color: None,
+            effect: Some(EffectSpec {
+                kind: EffectKind::Ripple,
+                colors: vec![],
+                speed: 6, // invalid
+                direction: Direction::Forward,
+                brightness: 4,
+            }),
+        });
+        assert!(cfg.validate().is_err(), "speed 6 must be rejected");
+    }
+
+    #[test]
+    fn effect_validation_rejects_brightness_overflow() {
+        use llw_effects::{Direction, EffectKind, EffectSpec};
+        let mut cfg = Config::new();
+        cfg.devices.push(DeviceConfig {
+            mac: "02:8b:51:62:32:e1".into(),
+            name: None,
+            slots: [SlotSpeed::Percent(0), SlotSpeed::Percent(0), SlotSpeed::Percent(0), SlotSpeed::Percent(0)],
+            color: None,
+            effect: Some(EffectSpec {
+                kind: EffectKind::Ripple,
+                colors: vec![],
+                speed: 3,
+                direction: Direction::Forward,
+                brightness: 5, // invalid
+            }),
+        });
+        assert!(cfg.validate().is_err(), "brightness 5 must be rejected");
+    }
+
+    #[test]
+    fn effect_validation_rejects_too_many_colors() {
+        use llw_effects::{Direction, EffectKind, EffectSpec};
+        let mut cfg = Config::new();
+        cfg.devices.push(DeviceConfig {
+            mac: "02:8b:51:62:32:e1".into(),
+            name: None,
+            slots: [SlotSpeed::Percent(0), SlotSpeed::Percent(0), SlotSpeed::Percent(0), SlotSpeed::Percent(0)],
+            color: None,
+            effect: Some(EffectSpec {
+                kind: EffectKind::Ripple,
+                colors: vec![[0, 0, 0]; 9], // max is 8
+                speed: 3,
+                direction: Direction::Forward,
+                brightness: 4,
+            }),
+        });
+        assert!(cfg.validate().is_err(), "palette > 8 entries must be rejected");
     }
 }

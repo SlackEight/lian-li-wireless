@@ -5,6 +5,7 @@
 use crate::acquisition::{self, Link};
 use crate::config::{Config, SlotSpeed};
 use crate::curve::{percent_to_pwm, Hysteresis, SortedCurve};
+use crate::effects_bridge;
 use crate::fan;
 use crate::observation::DropoutFilter;
 use crate::reliability::{Action, Reliability};
@@ -24,6 +25,10 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const RGB_REUPLOAD_COOLDOWN: Duration = Duration::from_secs(5);
 /// Failsafe engages when a sensor has been unreadable this long — or immediately if it has never produced a reading.
 const SENSOR_FAILSAFE_AFTER: Duration = Duration::from_secs(60);
+/// Conservative frame budget for effect animations before the flash-size probe (Task 8).
+/// Task 8 measures the firmware's animation storage ceiling and raises this value
+/// to ~75% of the measured frame ceiling (or keeps 24 if the ceiling is ≤32 frames).
+const FRAME_BUDGET: u16 = 24;
 
 /// What a step did — simulation tests assert on this.
 #[derive(Debug, Default, PartialEq)]
@@ -371,11 +376,27 @@ impl<T: UsbIo> Supervisor<T> {
         let mut uploads = 0u32;
         let device_cfgs: Vec<crate::config::DeviceConfig> = self.cfg.devices.clone();
         for dc in &device_cfgs {
-            let Some(color) = dc.color else { continue };
             let Ok(mac) = crate::config::parse_mac(&dc.mac) else { continue };
             let Some(dev) = self.devices.get_mut(&mac) else { continue };
             let Some(rec) = dev.last_record.clone() else { continue };
-            let frame = rgb_assert::static_frame(&rec, &color);
+
+            // Resolve the frames to upload: effect takes precedence over color.
+            // Returns (frames, interval_ms). Static color is a single-frame upload.
+            let upload_payload: Option<(Vec<Vec<[u8; 3]>>, u16)> =
+                if let Some(spec) = &dc.effect {
+                    // Effect path: compile via bridge; fall through to color on None.
+                    effects_bridge::compile(spec, &rec, FRAME_BUDGET)
+                        .or_else(|| {
+                            dc.color.map(|color| {
+                                (vec![rgb_assert::static_frame(&rec, &color)], 5000)
+                            })
+                        })
+                } else {
+                    dc.color.map(|color| (vec![rgb_assert::static_frame(&rec, &color)], 5000))
+                };
+
+            let Some((frames, interval_ms)) = upload_payload else { continue };
+
             let needs = match dev.expected_fx {
                 None => true, // never asserted this session
                 Some(exp) => rgb_assert::drifted(&exp, &rec.effect_index),
@@ -390,8 +411,8 @@ impl<T: UsbIo> Supervisor<T> {
                     &link.master_mac,
                     rec.channel,
                     rec.rx_type,
-                    &[frame],
-                    5000,
+                    &frames,
+                    interval_ms,
                     4,
                 ) {
                     Ok(idx) => {
@@ -669,6 +690,7 @@ mod tests {
                 SlotSpeed::Percent(0),
             ],
             color: Some(StaticColor { rgb: [255, 255, 255], brightness: 4 }),
+            effect: None,
         });
         cfg
     }
@@ -932,6 +954,7 @@ mod tests {
                 SlotSpeed::Percent(0),
             ],
             color: None,
+            effect: None,
         });
         cfg.control.tick_ms = 0; // fan tick every step
         cfg.control.keepalive_ms = 1_000_000; // suppress keepalive during test
@@ -998,6 +1021,7 @@ mod tests {
                 SlotSpeed::Percent(0),
             ],
             color: None,
+            effect: None,
         });
         cfg.control.tick_ms = 0;
         cfg.control.keepalive_ms = 1_000_000;
@@ -1102,5 +1126,110 @@ mod tests {
         // Step at +11s: past keepalive (10s from last send at +1s) → send.
         let out = sup.step(t0 + Duration::from_secs(11));
         assert_eq!(out.sent_pwm, 1, "keepalive fires at +11s");
+    }
+
+    #[test]
+    fn effect_ripple_upload_fires_on_acquisition_poll() {
+        // Verify that a config with effect=ripple causes an RGB upload on the first
+        // poll step after acquisition (uploaded_rgb == 1), exactly like the static path.
+        // The multi-frame payload is verified separately in effect_ripple_compile_produces_multiframe_upload.
+        use llw_effects::{Direction, EffectKind, EffectSpec};
+
+        fn run_sim_and_get_uploaded_rgb(cfg: Config) -> u32 {
+            let rec = record_bytes([0; 4], [0; 4]);
+            let mut cfg2 = cfg;
+            cfg2.observation.poll_ms = 0;
+            cfg2.control.tick_ms = 10_000;     // suppress PWM ticks
+            cfg2.control.keepalive_ms = 10_000; // suppress keepalive
+            let script = vec![getdev_resp(&[rec]); 4];
+            let (mut sup, t0) = sim(cfg2, script);
+            let out1 = sup.step(t0);
+            assert!(out1.acquired, "must acquire");
+            let out2 = sup.step(t0 + Duration::from_secs(1));
+            out2.uploaded_rgb
+        }
+
+        // Static white config
+        let mut static_cfg = Config::new();
+        static_cfg.devices.push(DeviceConfig {
+            mac: "02:8b:51:62:32:e1".into(),
+            name: None,
+            slots: [SlotSpeed::Percent(0), SlotSpeed::Percent(0), SlotSpeed::Percent(0), SlotSpeed::Percent(0)],
+            color: Some(StaticColor { rgb: [255, 255, 255], brightness: 4 }),
+            effect: None,
+        });
+
+        // Ripple config (effect takes precedence; no color field needed)
+        let mut ripple_cfg = Config::new();
+        ripple_cfg.devices.push(DeviceConfig {
+            mac: "02:8b:51:62:32:e1".into(),
+            name: None,
+            slots: [SlotSpeed::Percent(0), SlotSpeed::Percent(0), SlotSpeed::Percent(0), SlotSpeed::Percent(0)],
+            color: None,
+            effect: Some(EffectSpec {
+                kind: EffectKind::Ripple,
+                colors: vec![[0, 0, 255], [136, 0, 255]],
+                speed: 3,
+                direction: Direction::Forward,
+                brightness: 4,
+            }),
+        });
+
+        // Both paths must produce exactly one upload on the first poll step.
+        assert_eq!(run_sim_and_get_uploaded_rgb(static_cfg), 1, "static must upload once");
+        assert_eq!(run_sim_and_get_uploaded_rgb(ripple_cfg), 1, "ripple must upload once");
+    }
+
+    #[test]
+    fn effect_ripple_compile_produces_multiframe_upload() {
+        // Verify via effects_bridge directly that the SL-INF 3-fan record compiles
+        // to exactly 24 frames of 132 LEDs each — confirming the supervisor will
+        // pass a 24-element slice to upload_rgb (not the 1-element static case).
+        use crate::effects_bridge;
+        use llw_protocol::record::parse_device_record;
+        use llw_effects::{Direction, EffectKind, EffectSpec};
+
+        // Construct a synthetic SL-INF 3-fan DeviceRecord identical to the sim record.
+        let mut raw = [0u8; 42];
+        raw[0..6].copy_from_slice(&MAC);
+        raw[6..12].copy_from_slice(&MASTER);
+        raw[12] = 2;
+        raw[13] = 1;
+        raw[18] = 0;  // fan device
+        raw[19] = 3;  // 3 fans
+        raw[24] = 36; // SL-INF fan type byte (leds_per_fan=44)
+        raw[41] = 0x1C;
+        let rec = parse_device_record(&raw, 0).expect("valid record");
+        assert_eq!(rec.total_leds(), 132);
+
+        let spec = EffectSpec {
+            kind: EffectKind::Ripple,
+            colors: vec![[0, 0, 255], [136, 0, 255]],
+            speed: 3,
+            direction: Direction::Forward,
+            brightness: 4,
+        };
+
+        let (frames, interval_ms) = effects_bridge::compile(&spec, &rec, FRAME_BUDGET)
+            .expect("SL-INF 3-fan ripple must compile");
+
+        // 24 frames, each 132 LEDs — this is what the supervisor passes to upload_rgb.
+        assert_eq!(frames.len(), 24, "ripple must produce 24 frames");
+        assert!(frames.iter().all(|f| f.len() == 132), "each frame must have 132 LEDs");
+
+        // interval = 3000 / 24 = 125ms (period_ms(3) / 24)
+        assert_eq!(interval_ms, 125, "interval should be 125ms");
+
+        // Multi-frame upload has MORE data than single-frame static:
+        // static = 1 frame × 132 LEDs; ripple = 24 frames × 132 LEDs (24× more raw data).
+        // Verify the frame count difference directly.
+        let static_frame_count = 1usize;
+        let ripple_frame_count = frames.len();
+        assert!(
+            ripple_frame_count > static_frame_count,
+            "ripple must produce more frames than static (got {ripple_frame_count} vs {static_frame_count})"
+        );
+        // The 24-frame animation is what gets uploaded — assert it's genuinely multi-frame.
+        assert!(ripple_frame_count >= 24, "ripple must be at least 24 frames (FRAME_BUDGET)");
     }
 }
