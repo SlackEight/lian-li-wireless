@@ -2730,6 +2730,95 @@ mod tests {
         assert_eq!(out.uploaded_rgb, 0, "no RGB upload during the settle window");
     }
 
+    /// Review carry-forward sim: re-bind dedup.
+    ///
+    /// A device that is already in the config with custom slots (Percent(55))
+    /// but is currently Unbound on the air (e.g. after a power-cycle while it
+    /// wasn't the active controller) can be re-bound via Bind. On convergence:
+    /// - exactly ONE config entry must exist for the MAC (no duplicate added)
+    /// - the original Percent(55) slots must be preserved (not reset to defaults)
+    #[test]
+    fn rebind_dedup_preserves_existing_slots() {
+        let zero_master = [0u8; 6];
+        // BIND_MAC is already in config with custom Percent(55) slots.
+        let mut cfg = bind_test_config();
+        cfg.devices.push(DeviceConfig {
+            mac: "de:ad:be:ef:01:02".into(),
+            name: None,
+            slots: [
+                SlotSpeed::Percent(55),
+                SlotSpeed::Percent(55),
+                SlotSpeed::Percent(55),
+                SlotSpeed::Percent(55),
+            ],
+            color: None,
+            effect: None,
+        });
+
+        // Air: MAC (Ours) + BIND_MAC (Unbound — lost bond after power-cycle)
+        let rec_ours = air_record_bytes(MAC, MASTER, [0; 4]);
+        let rec_unbound = air_record_bytes(BIND_MAC, zero_master, [0; 4]);
+        // After bind, BIND_MAC shows bound to MASTER with rx_type=2
+        let rec_bound = {
+            let mut r = air_record_bytes(BIND_MAC, MASTER, [0; 4]);
+            r[13] = 2; // rx_type = 2 = target_rx
+            r
+        };
+
+        let initial = getdev_resp_multi(&[rec_ours, rec_unbound]);
+        let converged = getdev_resp_multi(&[rec_ours, rec_bound]);
+        let mut script = vec![initial; 3];
+        script.extend(vec![converged; 6]);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let (mut sup, ipc_tx, t0) = sim_with_ipc(cfg, script, config_path.clone());
+
+        // Acquire
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+        assert_eq!(sup.air.len(), 2, "both devices on air");
+
+        // Queue Bind on the already-configured-but-Unbound device
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "de:ad:be:ef:01:02".to_string() },
+            reply: reply_tx,
+        }).unwrap();
+
+        // Step: drains IPC → processes Bind → accepted (Unbound → can be bound)
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        let resp = reply_rx.try_recv().unwrap();
+        assert!(resp.ok, "re-bind must be accepted for Unbound device: {:?}", resp.error);
+        assert!(sup.pending_op.is_some(), "pending_op must be set");
+
+        // Step: still initial records (not converged yet)
+        let _ = sup.step(t0 + Duration::from_secs(2));
+        // Step: converged records → convergence detected
+        let _ = sup.step(t0 + Duration::from_secs(3));
+        assert!(sup.pending_op.is_none(), "pending_op must be cleared after convergence");
+
+        // Verify config: exactly ONE entry for BIND_MAC
+        let saved = crate::config::Config::load(&config_path).unwrap();
+        let entries: Vec<_> = saved.devices.iter()
+            .filter(|d| d.mac == "de:ad:be:ef:01:02")
+            .collect();
+        assert_eq!(entries.len(), 1, "must be exactly ONE config entry for the MAC, got {}", entries.len());
+
+        // Original Percent(55) slots must be preserved (not reset to defaults)
+        let dc = entries[0];
+        assert!(
+            dc.slots.iter().all(|s| *s == SlotSpeed::Percent(55)),
+            "re-bind must preserve original Percent(55) slots, got {:?}", dc.slots
+        );
+
+        // DeviceRuntime must be present
+        assert!(
+            sup.devices.contains_key(&BIND_MAC),
+            "runtime must have BIND_MAC after re-bind"
+        );
+    }
+
     /// CRITICAL invariant: the deadline re-burst must be gated on the bond
     /// still matching the op's precondition. If another controller claims the
     /// device mid-op (Unbound → Foreign), the op fails immediately and NO

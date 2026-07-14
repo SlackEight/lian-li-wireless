@@ -63,6 +63,16 @@ enum Command {
         #[arg(long, default_value_t = 4)]
         brightness: u8,
     },
+    /// Bind an unbound wireless device to this controller via the daemon
+    Bind {
+        /// MAC address of the device to bind (e.g. aa:bb:cc:dd:ee:ff)
+        mac: String,
+    },
+    /// Unbind a wireless device from this controller via the daemon
+    Unbind {
+        /// MAC address of the device to unbind (e.g. aa:bb:cc:dd:ee:ff)
+        mac: String,
+    },
     /// Poll devices continuously, printing telemetry (Ctrl+C to stop)
     Watch {
         /// Poll interval in milliseconds
@@ -110,6 +120,8 @@ fn main() -> Result<()> {
         Command::SetEffect { index_or_mac, kind, colors, speed, direction, brightness } => {
             set_effect_ipc(&index_or_mac, &kind, colors.as_deref(), speed, &direction, brightness)
         }
+        Command::Bind { mac } => bind_ipc(&mac),
+        Command::Unbind { mac } => unbind_ipc(&mac),
         Command::Watch { interval_ms, pwm } => watch(interval_ms, pwm),
         Command::ProbeChase { index, ms, block } => probe_chase(index, ms, block),
         Command::ProbeFrames { index, frames } => probe_frames(index, frames),
@@ -264,6 +276,143 @@ fn set_effect_ipc(
     }
     println!("Effect {:?} set on {}", kind_str, mac);
     Ok(())
+}
+
+/// Validate that `s` is a parseable MAC address (6 colon-separated hex octets).
+/// Accepted formats: `aa:bb:cc:dd:ee:ff` (lowercase/uppercase, no normalization).
+fn validate_mac(s: &str) -> Result<()> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 6 {
+        bail!("invalid MAC {:?} — expected 6 colon-separated hex octets (e.g. aa:bb:cc:dd:ee:ff)", s);
+    }
+    for p in &parts {
+        if p.len() != 2 || !p.chars().all(|c| c.is_ascii_hexdigit()) {
+            bail!("invalid MAC {:?} — octet {:?} is not two hex digits", s, p);
+        }
+    }
+    Ok(())
+}
+
+/// The error string returned by the daemon when the radio is still settling
+/// after a recent bind/unbind or RGB upload. Transient; auto-retried.
+const SETTLING_ERROR: &str = "radio settling";
+
+/// Send a Bind IPC request; on `{"state":"started"}` poll until bound or
+/// timeout. Auto-retries the "radio settling" transient up to 3 times.
+fn bind_ipc(mac: &str) -> Result<()> {
+    validate_mac(mac)?;
+    let mac_norm = mac.to_lowercase();
+    let req = serde_json::json!({"v": 1, "method": "Bind", "mac": mac_norm});
+    let resp = ipc_request_with_retry(&req)?;
+    if !resp["ok"].as_bool().unwrap_or(false) {
+        bail!("{}", resp["error"].as_str().unwrap_or("daemon error"));
+    }
+    // Accepted — poll Status until converged or timeout.
+    poll_bind_convergence(&mac_norm, false)
+}
+
+/// Send an Unbind IPC request; mirror of bind_ipc.
+fn unbind_ipc(mac: &str) -> Result<()> {
+    validate_mac(mac)?;
+    let mac_norm = mac.to_lowercase();
+    let req = serde_json::json!({"v": 1, "method": "Unbind", "mac": mac_norm});
+    let resp = ipc_request_with_retry(&req)?;
+    if !resp["ok"].as_bool().unwrap_or(false) {
+        bail!("{}", resp["error"].as_str().unwrap_or("daemon error"));
+    }
+    poll_bind_convergence(&mac_norm, true)
+}
+
+/// Send a request, auto-retrying on the "radio settling" transient error
+/// up to 3 times with 2s gaps before surfacing it.
+fn ipc_request_with_retry(req: &serde_json::Value) -> Result<serde_json::Value> {
+    let mut last_resp = None;
+    for attempt in 0..3u32 {
+        let resp = ipc_request(req)?;
+        let is_settling = !resp["ok"].as_bool().unwrap_or(false)
+            && resp["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains(SETTLING_ERROR);
+        if !is_settling {
+            return Ok(resp);
+        }
+        if attempt < 2 {
+            eprintln!("radio settling, retrying in 2s… (attempt {}/3)", attempt + 1);
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+        last_resp = Some(resp);
+    }
+    Ok(last_resp.unwrap())
+}
+
+/// Poll Status every 500ms for up to 12s, printing progress from `pending`.
+/// For bind: success = mac appears in `devices` (bound + configured).
+/// For unbind: success = mac absent from both `devices` and `pending`.
+fn poll_bind_convergence(mac: &str, is_unbind: bool) -> Result<()> {
+    let op_name = if is_unbind { "unbind" } else { "bind" };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+    let status_req = serde_json::json!({"v": 1, "method": "Status"});
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let resp = ipc_request(&status_req)?;
+        if !resp["ok"].as_bool().unwrap_or(false) {
+            bail!("daemon error polling status: {}", resp["error"].as_str().unwrap_or("unknown"));
+        }
+        let d = &resp["data"];
+        let pending = &d["pending"];
+
+        // Check if the pending op has failed.
+        if !pending.is_null() {
+            let op = pending["op"].as_str().unwrap_or("");
+            let pending_mac = pending["mac"].as_str().unwrap_or("");
+            let state = pending["state"].as_str().unwrap_or("");
+            if op == op_name && pending_mac == mac {
+                if state == "failed" {
+                    bail!(
+                        "{} failed — device did not converge; check llw status",
+                        op_name
+                    );
+                }
+                // Still converging — print progress.
+                println!("converging…");
+            }
+        }
+
+        // Check final state.
+        let devices = d["devices"].as_array();
+        if is_unbind {
+            // Unbind success: mac absent from devices list AND no pending op for this mac.
+            let still_configured = devices
+                .unwrap_or(&Vec::new())
+                .iter()
+                .any(|dv| dv["mac"].as_str().unwrap_or("") == mac);
+            let still_pending = !pending.is_null()
+                && pending["mac"].as_str().unwrap_or("") == mac
+                && pending["state"].as_str().unwrap_or("") != "failed";
+            if !still_configured && !still_pending {
+                println!("unbound ✓");
+                return Ok(());
+            }
+        } else {
+            // Bind success: mac appears in devices list AND no pending op for this mac.
+            let is_bound = devices
+                .unwrap_or(&Vec::new())
+                .iter()
+                .any(|dv| dv["mac"].as_str().unwrap_or("") == mac);
+            let still_pending = !pending.is_null()
+                && pending["mac"].as_str().unwrap_or("") == mac
+                && pending["state"].as_str().unwrap_or("") != "failed";
+            if is_bound && !still_pending {
+                println!("bound + configured ✓");
+                return Ok(());
+            }
+        }
+
+        if std::time::Instant::now() >= deadline {
+            bail!("still converging — check llw status");
+        }
+    }
 }
 
 /// If `index_or_mac` parses as a `u8`, resolve it to a MAC via a Status call.
