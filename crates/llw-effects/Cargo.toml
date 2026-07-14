@@ -1,0 +1,12 @@
+[package]
+name = "llw-effects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure, deterministic RGB effect engine for Lian Li wireless devices"
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
