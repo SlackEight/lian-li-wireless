@@ -39,8 +39,13 @@ impl Geometry {
 /// Ring angle for LED index `i` within a fan that has `leds_per_fan` LEDs.
 ///
 /// Returns `i / leds_per_fan` ∈ [0, 1).
+///
+/// # Preconditions
+///
+/// `leds_per_fan` must be greater than 0.
 #[inline]
 pub fn ring_angle(i: u8, leds_per_fan: u8) -> f32 {
+    debug_assert!(leds_per_fan > 0, "leds_per_fan must be > 0");
     i as f32 / leds_per_fan as f32
 }
 
@@ -48,16 +53,27 @@ pub fn ring_angle(i: u8, leds_per_fan: u8) -> f32 {
 /// fans and `leds_per_fan` LEDs per fan.
 ///
 /// Returns `(fan + i/leds_per_fan) / fan_count` ∈ [0, 1).
+///
+/// # Preconditions
+///
+/// Both `fan_count` and `leds_per_fan` must be greater than 0.
 #[inline]
 pub fn chain_pos(fan: u8, i: u8, fan_count: u8, leds_per_fan: u8) -> f32 {
+    debug_assert!(fan_count > 0, "fan_count must be > 0");
+    debug_assert!(leds_per_fan > 0, "leds_per_fan must be > 0");
     (fan as f32 + i as f32 / leds_per_fan as f32) / fan_count as f32
 }
 
 /// Linear position for LED `i` in a strip of `total` LEDs.
 ///
 /// Returns `i / total` ∈ [0, 1).
+///
+/// # Preconditions
+///
+/// `total` must be greater than 0.
 #[inline]
 pub fn strip_pos(i: u16, total: u16) -> f32 {
+    debug_assert!(total > 0, "total must be > 0");
     i as f32 / total as f32
 }
 

@@ -330,6 +330,43 @@ mod tests {
         assert_eq!(json, r#""static""#);
     }
 
+    // --- wire-name pins (carry-forward from Task 1 review) ---
+
+    #[test]
+    fn wire_name_color_cycle() {
+        // EffectKind::ColorCycle must serialise to "color-cycle" (kebab-case).
+        let json = serde_json::to_string(&EffectKind::ColorCycle).unwrap();
+        assert_eq!(json, r#""color-cycle""#, "ColorCycle wire name mismatch");
+    }
+
+    #[test]
+    fn wire_name_rainbow_morph() {
+        // EffectKind::RainbowMorph must serialise to "rainbow-morph".
+        let json = serde_json::to_string(&EffectKind::RainbowMorph).unwrap();
+        assert_eq!(json, r#""rainbow-morph""#, "RainbowMorph wire name mismatch");
+    }
+
+    #[test]
+    fn partial_json_ripple_uses_defaults() {
+        // {"kind":"ripple"} must deserialise cleanly with all defaults applied.
+        let json = r#"{"kind":"ripple"}"#;
+        let spec: EffectSpec = serde_json::from_str(json)
+            .expect(r#"{"kind":"ripple"} should deserialise with defaults"#);
+        assert_eq!(spec.kind, EffectKind::Ripple);
+        assert_eq!(spec.speed, 3);
+        assert_eq!(spec.brightness, 4);
+        assert_eq!(spec.direction, Direction::Forward);
+        assert!(spec.colors.is_empty());
+    }
+
+    #[test]
+    fn unknown_kind_errors() {
+        // An unrecognised kind must produce a deserialisation error, not silently default.
+        let json = r#"{"kind":"frobnicate"}"#;
+        let result: Result<EffectSpec, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "unknown kind should fail to deserialise");
+    }
+
     // --- directional / direction ---
 
     #[test]
