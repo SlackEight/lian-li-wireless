@@ -225,7 +225,12 @@ impl<T: UsbIo> Supervisor<T> {
         if self.pending_op.is_some() {
             self.check_bind_convergence(now);
         }
-        if out.polled {
+        // RF-silence invariant: re-read rf_settle_until instead of the stale
+        // `in_settle` snapshot — this covers both the forced-poll-during-settle
+        // case (pending op above sets out.polled while in settle) and same-step
+        // settle engagement (check_bind_convergence just sent save_config and
+        // opened the window). No RGB uploads while the window is open.
+        if out.polled && self.rf_settle_until.is_none() {
             out.uploaded_rgb = self.rgb_tick(now);
         }
         match self.reliability.poll(now) {
@@ -730,6 +735,11 @@ impl<T: UsbIo> Supervisor<T> {
                 ResponseEnvelope::ok(None)
             }
             Request::Bind { mac } => {
+                // No new RF ops while the post-save/post-upload silence window
+                // is open — the firmware's flash-commit needs the quiet.
+                if self.rf_settle_until.is_some() {
+                    return ResponseEnvelope::err("radio settling — retry shortly");
+                }
                 let Some(link) = self.link else {
                     return ResponseEnvelope::err("no link");
                 };
@@ -779,6 +789,9 @@ impl<T: UsbIo> Supervisor<T> {
                 ResponseEnvelope::ok(Some(serde_json::json!({"state": "started"})))
             }
             Request::Unbind { mac } => {
+                if self.rf_settle_until.is_some() {
+                    return ResponseEnvelope::err("radio settling — retry shortly");
+                }
                 let Some(link) = self.link else {
                     return ResponseEnvelope::err("no link");
                 };
@@ -861,6 +874,13 @@ impl<T: UsbIo> Supervisor<T> {
         // Check convergence from air inventory
         let converged = if unbind {
             match self.air.get(&mac) {
+                // Absent counts as converged for completeness, but real
+                // hardware keeps advertising with a zeroed master after an
+                // unbind, so convergence in practice arrives via the Unbound
+                // reclassification on the next poll. A silently vanished
+                // device only leaves the inventory via the 30s air prune —
+                // long after both 5s deadlines — so it fails the op instead
+                // (hardware confirmation tracked in Task 6).
                 None => true,
                 Some(e) => e.bond == Bond::Unbound,
             }
@@ -873,7 +893,13 @@ impl<T: UsbIo> Supervisor<T> {
 
         if converged {
             let op = self.pending_op.take().unwrap();
-            let Some(link) = self.link else { return };
+            let Some(link) = self.link else {
+                warn!(
+                    "bind op for {} converged but the link is gone — dropping op without save-config",
+                    mac_str(&op.mac)
+                );
+                return;
+            };
             // Send save_config
             if let Some(dongle) = self.dongle.as_mut() {
                 if let Err(e) = dongle.send_save_config(&link.master_mac, link.channel) {
@@ -897,19 +923,25 @@ impl<T: UsbIo> Supervisor<T> {
                     Some(name) => SlotSpeed::Curve(name),
                     None => SlotSpeed::Percent(40),
                 };
-                let new_dc = crate::config::DeviceConfig {
-                    mac: mac_str.clone(),
-                    name: None,
-                    slots: [
-                        default_slot.clone(),
-                        default_slot.clone(),
-                        default_slot.clone(),
-                        default_slot,
-                    ],
-                    color: None,
-                    effect: None,
-                };
-                self.cfg.devices.push(new_dc);
+                // Re-bind of a still-configured device keeps the user's
+                // existing slots/colors — only add a default entry when none
+                // exists. (The runtime insert below replaces any stale
+                // DeviceRuntime, which is correct: a fresh dropout filter
+                // after the device re-joined the network.)
+                if !self.cfg.devices.iter().any(|d| d.mac == mac_str) {
+                    self.cfg.devices.push(crate::config::DeviceConfig {
+                        mac: mac_str.clone(),
+                        name: None,
+                        slots: [
+                            default_slot.clone(),
+                            default_slot.clone(),
+                            default_slot.clone(),
+                            default_slot,
+                        ],
+                        color: None,
+                        effect: None,
+                    });
+                }
                 if let Err(e) = self.cfg.save(&self.config_path) {
                     warn!("config save after bind failed: {e}");
                 }
@@ -934,9 +966,27 @@ impl<T: UsbIo> Supervisor<T> {
         let op = self.pending_op.as_mut().unwrap();
         if now >= op.deadline {
             if op.bursts < 2 {
+                // CRITICAL invariant (re-burst gate): never transmit a bind
+                // frame at a device whose bond no longer matches the op's
+                // precondition — Unbound for bind, Ours for unbind. A device
+                // that went Foreign mid-op (another controller claimed it),
+                // flipped state, or vanished from the air fails the op
+                // immediately, burst-free.
+                let precondition_holds = match self.air.get(&mac) {
+                    Some(e) if unbind => e.bond == Bond::Ours,
+                    Some(e) => e.bond == Bond::Unbound,
+                    None => false,
+                };
+                if !precondition_holds {
+                    warn!(
+                        "{} op for {} lost its bond precondition — failing without re-burst",
+                        if unbind { "unbind" } else { "bind" },
+                        mac_str(&mac)
+                    );
+                    self.pending_op.as_mut().unwrap().failed_at = Some(now);
+                    return;
+                }
                 // Re-burst
-                let mac = op.mac;
-                let target_rx = op.target_rx;
                 if let (Some(air_entry), Some(link)) = (self.air.get(&mac).cloned(), self.link) {
                     let zero_master = [0u8; 6];
                     let target_master = if unbind { &zero_master } else { &link.master_mac };
@@ -1109,29 +1159,6 @@ mod tests {
             }),
             None,
             std::env::temp_dir().join("llw-daemon-test-config.json"),
-        );
-        (sup, Instant::now())
-    }
-
-    /// Build a supervisor with an explicit config path (for tests that verify saves).
-    #[allow(dead_code)]
-    fn sim_with_config(
-        cfg: Config,
-        rx_script: Vec<Vec<u8>>,
-        config_path: std::path::PathBuf,
-    ) -> (Supervisor<FakeIo>, Instant) {
-        let sup = Supervisor::new(
-            cfg,
-            std::env::temp_dir(),
-            Box::new(move || {
-                let rx = FakeIo::default();
-                for r in rx_script.clone() {
-                    rx.push_read(r);
-                }
-                Ok(Dongle::from_parts(FakeIo::default(), Some(rx)))
-            }),
-            None,
-            config_path,
         );
         (sup, Instant::now())
     }
@@ -2219,23 +2246,34 @@ mod tests {
     }
 
     /// Byte-level verification of the bind path: the burst is exactly 6×4 USB
-    /// writes addressed to the record's CURRENT channel+rx, carrying a bind
-    /// frame that targets OUR master at the computed target_rx with the
-    /// device's current PWM passed through; save-config (3×4 writes, rx 0xFF)
-    /// follows convergence — and only convergence.
+    /// writes addressed to the record's CURRENT channel (7 — deliberately
+    /// different from our link channel 2, so the two are distinguishable) and
+    /// CURRENT rx, carrying a bind frame that targets OUR master at the
+    /// computed target_rx with the device's current PWM passed through;
+    /// save-config (3×4 writes, rx 0xFF) follows convergence — and only
+    /// convergence.
     #[test]
     fn bind_burst_and_save_config_bytes() {
         let zero_master = [0u8; 6];
         let rec_ours = air_record_bytes(MAC, MASTER, [0; 4]); // rx_type=1, channel=2
-        let rec_unbound = air_record_bytes(BIND_MAC, zero_master, [55, 66, 77, 0]);
+        let rec_unbound = {
+            let mut r = air_record_bytes(BIND_MAC, zero_master, [55, 66, 77, 0]);
+            r[12] = 7; // parked on channel 7 ≠ our link channel 2
+            r
+        };
         let rec_bound = {
             let mut r = air_record_bytes(BIND_MAC, MASTER, [55, 66, 77, 0]);
             r[13] = 2; // rx_type = target_rx
             r
         };
+        // Acquisition refuses mixed-channel responses (mid-transition rule),
+        // so the channel-7 device only shows up from the first poll onward.
+        let acquire_resp = getdev_resp_multi(&[rec_ours]);
         let initial = getdev_resp_multi(&[rec_ours, rec_unbound]);
         let converged = getdev_resp_multi(&[rec_ours, rec_bound]);
-        let mut script = vec![initial; 2]; // acquire + bind-step poll
+        let mut script = vec![acquire_resp];
+        script.push(initial.clone()); // t0+1s poll — puts the ch-7 entry on air
+        script.push(initial); // t0+2s poll (bind-accept step) — not yet converged
         script.extend(vec![converged; 6]);
 
         let tmp = tempfile::tempdir().unwrap();
@@ -2245,6 +2283,7 @@ mod tests {
 
         let out = sup.step(t0);
         assert!(out.acquired, "must acquire");
+        let _ = sup.step(t0 + Duration::from_secs(1)); // air learns the ch-7 device
 
         let mark = tx.written().len();
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
@@ -2252,18 +2291,19 @@ mod tests {
             req: crate::ipc::Request::Bind { mac: "de:ad:be:ef:01:02".into() },
             reply: reply_tx,
         }).unwrap();
-        let _ = sup.step(t0 + Duration::from_secs(1));
+        let _ = sup.step(t0 + Duration::from_secs(2));
         assert!(reply_rx.try_recv().unwrap().ok, "bind must be accepted");
 
         // The bind burst: 24 writes (6 frames × 4 chunks), USB-addressed to
-        // the record's CURRENT channel (2) and rx_type (1). Heartbeat frames
-        // (rf[1]=0x14) and the configured device's PWM frame (0x10 but a
-        // different device MAC) on the same transport are filtered out.
+        // the record's CURRENT channel (7, NOT our link channel 2) and
+        // rx_type (1). Heartbeat frames (rf[1]=0x14) and the configured
+        // device's PWM frame (0x10 but a different device MAC) on the same
+        // transport are filtered out.
         let all = tx.written();
         let bind_writes = frames_of_kind(&all[mark..], 0x10, Some(&BIND_MAC));
         assert_eq!(bind_writes.len(), 24, "bind burst must be exactly 6×4=24 USB writes");
         for (i, w) in bind_writes.iter().enumerate() {
-            assert_eq!(w[2], 2, "packet[{i}][2] must be the record's CURRENT channel");
+            assert_eq!(w[2], 7, "packet[{i}][2] must be the record's CURRENT channel (7), not the link channel");
             assert_eq!(w[3], 1, "packet[{i}][3] must be the record's CURRENT rx_type");
         }
         // Pin the RF payload via chunk 0 of the first frame (rf[n] = packet[4+n]).
@@ -2273,7 +2313,7 @@ mod tests {
         assert_eq!(&first[6..12], &BIND_MAC, "rf[2..8] = device MAC");
         assert_eq!(&first[12..18], &MASTER, "rf[8..14] = OUR master (bind target)");
         assert_eq!(first[18], 2, "rf[14] = target_rx");
-        assert_eq!(first[19], 2, "rf[15] = master channel");
+        assert_eq!(first[19], 2, "rf[15] = LINK channel (2) — distinct from the record's channel (7)");
         assert_eq!(first[20], 2, "rf[16] = target_rx (seq-byte reuse)");
         assert_eq!(&first[21..25], &[55, 66, 77, 0], "rf[17..21] = current PWM passthrough");
         assert!(
@@ -2283,7 +2323,7 @@ mod tests {
 
         // Convergence step: record flips to our-master + target_rx.
         let mark = tx.written().len();
-        let _ = sup.step(t0 + Duration::from_secs(2));
+        let _ = sup.step(t0 + Duration::from_secs(3));
         assert!(sup.pending_op.is_none(), "must converge");
         let all = tx.written();
         let save_writes = frames_of_kind(&all[mark..], 0x15, None);
@@ -2507,5 +2547,237 @@ mod tests {
         assert_eq!(pending.get("op").and_then(|v| v.as_str()), Some("bind"));
         assert_eq!(pending.get("state").and_then(|v| v.as_str()), Some("converging"));
         assert_eq!(pending.get("mac").and_then(|v| v.as_str()), Some("de:ad:be:ef:01:02"));
+    }
+
+    /// When the config has at least one curve, a successful bind auto-adds the
+    /// device with all four slots bound to the FIRST curve, not Percent(40).
+    #[test]
+    fn bind_auto_entry_uses_first_curve() {
+        let zero_master = [0u8; 6];
+        let rec_ours = air_record_bytes(MAC, MASTER, [0; 4]);
+        let rec_unbound = air_record_bytes(BIND_MAC, zero_master, [0; 4]);
+        let rec_bound = {
+            let mut r = air_record_bytes(BIND_MAC, MASTER, [0; 4]);
+            r[13] = 2; // rx_type = target_rx
+            r
+        };
+        let initial = getdev_resp_multi(&[rec_ours, rec_unbound]);
+        let converged = getdev_resp_multi(&[rec_ours, rec_bound]);
+        let mut script = vec![initial; 3];
+        script.extend(vec![converged; 6]);
+
+        let mut cfg = bind_test_config();
+        cfg.curves.push(crate::config::Curve {
+            name: "quiet".into(),
+            sensor: crate::config::SensorSpec {
+                hwmon_name: "k10temp".into(),
+                input: "temp1_input".into(),
+            },
+            points: vec![(30.0, 20.0), (70.0, 100.0)],
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let (mut sup, ipc_tx, t0) = sim_with_ipc(cfg, script, config_path.clone());
+
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "de:ad:be:ef:01:02".into() },
+            reply: reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        assert!(reply_rx.try_recv().unwrap().ok, "bind must be accepted");
+        let _ = sup.step(t0 + Duration::from_secs(2));
+        let _ = sup.step(t0 + Duration::from_secs(3));
+        assert!(sup.pending_op.is_none(), "must converge");
+
+        let saved = crate::config::Config::load(&config_path).unwrap();
+        let dc = saved.devices.iter().find(|d| d.mac == "de:ad:be:ef:01:02").unwrap();
+        assert!(
+            dc.slots.iter().all(|s| *s == SlotSpeed::Curve("quiet".into())),
+            "auto-entry slots must use the first curve, got {:?}", dc.slots
+        );
+    }
+
+    /// A new Bind arriving during the post-save-config RF settle window must
+    /// be refused with the settling error.
+    #[test]
+    fn bind_refused_during_settle_window() {
+        let zero_master = [0u8; 6];
+        let second_mac: [u8; 6] = [0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x01];
+        let rec_ours = air_record_bytes(MAC, MASTER, [0; 4]);
+        let rec_unbound_a = air_record_bytes(BIND_MAC, zero_master, [0; 4]);
+        let rec_unbound_b = air_record_bytes(second_mac, zero_master, [0; 4]);
+        let rec_bound_a = {
+            let mut r = air_record_bytes(BIND_MAC, MASTER, [0; 4]);
+            r[13] = 2;
+            r
+        };
+        let initial = getdev_resp_multi(&[rec_ours, rec_unbound_a, rec_unbound_b]);
+        let converged = getdev_resp_multi(&[rec_ours, rec_bound_a, rec_unbound_b]);
+        let mut script = vec![initial; 2];
+        script.extend(vec![converged; 8]);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let (mut sup, ipc_tx, t0) = sim_with_ipc(bind_test_config(), script, config_path);
+
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+
+        // First bind: accepted at t0+1s, converges at t0+2s → save-config +
+        // settle window until t0+5s.
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "de:ad:be:ef:01:02".into() },
+            reply: reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        assert!(reply_rx.try_recv().unwrap().ok, "first bind must be accepted");
+        let _ = sup.step(t0 + Duration::from_secs(2));
+        assert!(sup.pending_op.is_none(), "first op must converge");
+        assert!(sup.rf_settle_until.is_some(), "settle window must be open");
+
+        // Second bind (a different, perfectly bindable device) inside the
+        // settle window → refused with the settling error, no pending op.
+        let (reply_tx2, reply_rx2) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "ca:fe:ba:be:00:01".into() },
+            reply: reply_tx2,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(3)); // inside settle (t0+2s..t0+5s)
+        let resp = reply_rx2.try_recv().unwrap();
+        assert!(!resp.ok, "bind during settle must be refused");
+        assert!(
+            resp.error.as_ref().unwrap().contains("settling"),
+            "got: {:?}", resp.error
+        );
+        assert!(sup.pending_op.is_none(), "refused bind must not create an op");
+    }
+
+    /// RF-silence invariant: the forced convergence polls during a settle
+    /// window must NOT trigger RGB uploads. A second configured device whose
+    /// first RGB assertion comes due mid-settle (record first seen then) must
+    /// stay silent until the window closes.
+    ///
+    /// (Same-device drift can never re-upload inside a window: the 5s
+    /// re-upload cooldown outlasts the 3s settle. A never-asserted device is
+    /// the only path that makes this test non-vacuous.)
+    #[test]
+    fn settle_with_pending_op_suppresses_rgb_tick() {
+        let zero_master = [0u8; 6];
+        let second_cfg_mac: [u8; 6] = [0x02, 0x8b, 0x51, 0x62, 0x32, 0xe2];
+        let mut cfg = bind_test_config();
+        // Both configured devices carry a static color so rgb_tick has work.
+        cfg.devices[0].color = Some(StaticColor { rgb: [255, 0, 0], brightness: 4 });
+        cfg.devices.push(DeviceConfig {
+            mac: "02:8b:51:62:32:e2".into(),
+            name: None,
+            slots: [
+                SlotSpeed::Percent(40),
+                SlotSpeed::Percent(40),
+                SlotSpeed::Percent(40),
+                SlotSpeed::Percent(0),
+            ],
+            color: Some(StaticColor { rgb: [0, 255, 0], brightness: 4 }),
+            effect: None,
+        });
+
+        let rec_ours = air_record_bytes(MAC, MASTER, [0; 4]);
+        let rec_ours_b = air_record_bytes(second_cfg_mac, MASTER, [0; 4]);
+        let rec_unbound = air_record_bytes(BIND_MAC, zero_master, [0; 4]);
+        // Device B is absent until t0+2s so its first (would-be) upload comes
+        // due during the settle window opened by device A's upload at t0+1s.
+        let without_b = getdev_resp_multi(&[rec_ours, rec_unbound]);
+        let with_b = getdev_resp_multi(&[rec_ours, rec_ours_b, rec_unbound]);
+        let mut script = vec![without_b; 2];
+        script.extend(vec![with_b; 8]);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let (mut sup, ipc_tx, t0) = sim_with_ipc(cfg, script, config_path);
+
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+
+        // t0+1s: Bind accepted at step start (settle not yet open); the poll's
+        // rgb_tick then uploads for device A and opens the settle window —
+        // leaving a pending op inside an active settle.
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "de:ad:be:ef:01:02".into() },
+            reply: reply_tx,
+        }).unwrap();
+        let out = sup.step(t0 + Duration::from_secs(1));
+        assert!(reply_rx.try_recv().unwrap().ok, "bind must be accepted");
+        assert_eq!(out.uploaded_rgb, 1, "device A's color must upload at t0+1s");
+        assert!(sup.rf_settle_until.is_some(), "settle window must be open");
+        assert!(sup.pending_op.is_some(), "op must still be pending");
+
+        // t0+2s (inside settle): the pending op forces the poll, which first
+        // ingests device B's record — B has never been asserted (expected_fx
+        // None, no cooldown), so only the settle gate stands between it and
+        // an upload. It must hold.
+        let out = sup.step(t0 + Duration::from_secs(2));
+        assert!(out.polled, "pending op must force the poll during settle");
+        assert!(
+            sup.devices.get(&second_cfg_mac).unwrap().last_record.is_some(),
+            "device B's record must have been ingested"
+        );
+        assert_eq!(out.uploaded_rgb, 0, "no RGB upload during the settle window");
+    }
+
+    /// CRITICAL invariant: the deadline re-burst must be gated on the bond
+    /// still matching the op's precondition. If another controller claims the
+    /// device mid-op (Unbound → Foreign), the op fails immediately and NO
+    /// second burst is transmitted at the foreign-bound device.
+    #[test]
+    fn bind_reburst_aborts_when_bond_flips_foreign() {
+        let zero_master = [0u8; 6];
+        let foreign_master: [u8; 6] = [0xBA, 0xDF, 0x00, 0xD5, 0x00, 0x01];
+        let rec_ours = air_record_bytes(MAC, MASTER, [0; 4]);
+        let rec_unbound = air_record_bytes(BIND_MAC, zero_master, [0; 4]);
+        let rec_foreign = air_record_bytes(BIND_MAC, foreign_master, [0; 4]);
+
+        let initial = getdev_resp_multi(&[rec_ours, rec_unbound]);
+        let stolen = getdev_resp_multi(&[rec_ours, rec_foreign]);
+        let mut script = vec![initial; 2]; // acquire + accept-step poll
+        script.extend(vec![stolen; 8]); // another controller claimed it
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let (mut sup, ipc_tx, tx, t0) =
+            sim_with_ipc_shared_tx(bind_test_config(), script, config_path);
+
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "de:ad:be:ef:01:02".into() },
+            reply: reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        assert!(reply_rx.try_recv().unwrap().ok, "bind must be accepted");
+
+        // t0+2s: poll reveals the device has gone Foreign (not converged).
+        let _ = sup.step(t0 + Duration::from_secs(2));
+        assert_eq!(sup.air.get(&BIND_MAC).unwrap().bond, Bond::Foreign);
+        let mark = tx.written().len();
+
+        // t0+6s: past the first deadline — instead of re-bursting at a
+        // foreign-bound device, the op must fail on the spot.
+        let _ = sup.step(t0 + Duration::from_secs(6));
+        let op = sup.pending_op.as_ref().expect("op must still be visible");
+        assert!(op.failed_at.is_some(), "op must be marked failed, not re-burst");
+        assert_eq!(op.bursts, 1, "burst count must not advance");
+        let all = tx.written();
+        assert!(
+            frames_of_kind(&all[mark..], 0x10, Some(&BIND_MAC)).is_empty(),
+            "NO bind frames may be transmitted at a foreign-bound device"
+        );
     }
 }
