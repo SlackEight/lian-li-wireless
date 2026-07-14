@@ -71,3 +71,13 @@ The SL-INF is bound and must stay that way; the honest test needs an unbound dev
 - The rename rgb_settle_until→rf_settle_until touches the M3 settle sim — mechanical rename, sim semantics unchanged.
 - Types: AirEntry/Bond (T3) consumed by T4's policy + StatusData; unused_rx (T2) takes records from the air inventory (T4 passes `air.values().map(|e| &e.record)` — collect as needed).
 - Judgment pre-made: bind targets get ALL FOUR slots set (extra slots are zeroed by apply_pwm_constraints at send time anyway); auto-config uses the FIRST curve by Vec order (deterministic).
+
+---
+
+## Task 6 results (2026-07-14 evening)
+
+**Refusal paths — validated LIVE against the running daemon:** `bind 02:8b:...` (bound SL-INF) → "already bound", exit 1 ✓; `bind aa:bb:...:99` (not on air) → "not visible on air", exit 1 ✓; `bind not-a-mac` → client-side format error ✓. Daemon healthy throughout (soak uninterrupted; ripple restored post-restart).
+
+**Live bind test — DEFERRED to Strimer install** (the only honest unbound target; unbinding the SL-INF as a test was ruled out by plan). When the Strimer is physically installed: `llw status` (expect it on air, Unbound) → `llw bind <mac>` → verify convergence + auto-config + flash persistence (later PSU cycle) → `llw set-effect <idx> ripple` closes M3's deferred Strimer validation in the same five minutes.
+
+M4a otherwise complete: 245 tests, clippy --all-targets clean, review loop included one Critical catch (re-burst bond re-check) now byte-sim-pinned.
