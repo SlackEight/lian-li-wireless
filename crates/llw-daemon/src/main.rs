@@ -99,6 +99,7 @@ fn run_daemon() -> Result<()> {
         std::path::PathBuf::from("/sys/class/hwmon"),
         Box::new(llw_protocol::dongle::Dongle::open),
         Some(ipc_rx),
+        path,
     );
     sup.run(&shutdown);
     let _ = std::fs::remove_file(ipc::socket_path());

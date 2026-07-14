@@ -35,6 +35,8 @@ pub enum Request {
     SetConfig { config: Config },
     SetColor { mac: String, rgb: [u8; 3], brightness: u8 },
     SetEffect { mac: String, effect: llw_effects::EffectSpec },
+    Bind { mac: String },
+    Unbind { mac: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -65,6 +67,14 @@ pub struct StatusData {
     pub reliability: Telemetry,
     pub devices: Vec<DeviceStatus>,
     pub air: Vec<AirDeviceStatus>,
+    pub pending: Option<PendingOpStatus>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PendingOpStatus {
+    pub op: String,    // "bind" or "unbind"
+    pub mac: String,
+    pub state: String, // "converging" or "failed"
 }
 
 /// A device visible on the air (from the air inventory), including both
@@ -221,6 +231,17 @@ mod tests {
     fn unknown_method_is_a_parse_error() {
         let line = r#"{"v":1,"method":"Frobnicate"}"#;
         assert!(serde_json::from_str::<RequestEnvelope>(line).is_err());
+    }
+
+    #[test]
+    fn bind_unbind_envelope_shapes() {
+        let line = r#"{"v":1,"method":"Bind","mac":"aa:bb:cc:dd:ee:ff"}"#;
+        let env: RequestEnvelope = serde_json::from_str(line).unwrap();
+        assert!(matches!(env.req, Request::Bind { .. }));
+
+        let line = r#"{"v":1,"method":"Unbind","mac":"aa:bb:cc:dd:ee:ff"}"#;
+        let env: RequestEnvelope = serde_json::from_str(line).unwrap();
+        assert!(matches!(env.req, Request::Unbind { .. }));
     }
 
     #[test]

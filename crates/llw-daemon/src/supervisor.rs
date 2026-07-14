@@ -63,10 +63,23 @@ impl Bond {
 }
 
 /// An entry in the air inventory: a device recently seen via GetDev.
+#[derive(Clone)]
 pub struct AirEntry {
     pub record: DeviceRecord,
     pub last_seen: Instant,
     pub bond: Bond,
+}
+
+const BIND_DEADLINE: Duration = Duration::from_secs(5);
+const BIND_FAIL_CLEAR: Duration = Duration::from_secs(30);
+
+pub(crate) struct BindOp {
+    pub mac: [u8; 6],
+    pub unbind: bool,
+    pub target_rx: u8,
+    pub deadline: Instant,
+    pub bursts: u8,
+    pub failed_at: Option<Instant>,
 }
 
 /// What a step did — simulation tests assert on this.
@@ -103,6 +116,7 @@ struct DeviceRuntime {
 
 pub struct Supervisor<T: UsbIo> {
     cfg: Config,
+    config_path: PathBuf,
     hwmon_base: PathBuf,
     connector: Box<dyn FnMut() -> llw_protocol::Result<Dongle<T>> + Send>,
     ipc_rx: Option<std::sync::mpsc::Receiver<crate::ipc::IpcCmd>>,
@@ -115,14 +129,16 @@ pub struct Supervisor<T: UsbIo> {
     last_poll: Option<Instant>,
     last_fan_tick: Option<Instant>,
     last_heartbeat: Option<Instant>,
-    /// Set after each successful RGB upload; poll_devices, fan_tick, and
+    /// Set after a successful RGB upload or bind/unbind; poll_devices, fan_tick, and
     /// send_heartbeat are skipped until this instant passes, giving the
     /// firmware's flash-commit window the RF silence it needs.
-    rgb_settle_until: Option<Instant>,
+    rf_settle_until: Option<Instant>,
     pub tx_wedged: bool,
     /// Air inventory: every device seen on the air, keyed by MAC. Entries
     /// are updated on every ingest and pruned after 30s of silence.
     pub air: HashMap<[u8; 6], AirEntry>,
+    /// In-flight bind or unbind operation (one at a time).
+    pub pending_op: Option<BindOp>,
 }
 
 impl<T: UsbIo> Supervisor<T> {
@@ -131,11 +147,13 @@ impl<T: UsbIo> Supervisor<T> {
         hwmon_base: PathBuf,
         connector: Box<dyn FnMut() -> llw_protocol::Result<Dongle<T>> + Send>,
         ipc_rx: Option<std::sync::mpsc::Receiver<crate::ipc::IpcCmd>>,
+        config_path: PathBuf,
     ) -> Self {
         let reliability = Reliability::new(&cfg.reliability);
         let (curves, devices) = build_runtimes(&cfg);
         Self {
             cfg,
+            config_path,
             hwmon_base,
             connector,
             ipc_rx,
@@ -148,9 +166,10 @@ impl<T: UsbIo> Supervisor<T> {
             last_poll: None,
             last_fan_tick: None,
             last_heartbeat: None,
-            rgb_settle_until: None,
+            rf_settle_until: None,
             tx_wedged: false,
             air: HashMap::new(),
+            pending_op: None,
         }
     }
 
@@ -171,10 +190,10 @@ impl<T: UsbIo> Supervisor<T> {
             return out;
         }
         // Check whether the post-upload RF-silence window has expired.
-        if self.rgb_settle_until.is_some_and(|u| now >= u) {
-            self.rgb_settle_until = None;
+        if self.rf_settle_until.is_some_and(|u| now >= u) {
+            self.rf_settle_until = None;
         }
-        let in_settle = self.rgb_settle_until.is_some();
+        let in_settle = self.rf_settle_until.is_some();
 
         // poll_devices, fan_tick, and send_heartbeat are suppressed during
         // the settle window (last_* stamps are NOT updated so they fire
@@ -193,6 +212,18 @@ impl<T: UsbIo> Supervisor<T> {
                 self.last_heartbeat = Some(now);
                 out.sent_heartbeat = self.send_heartbeat();
             }
+        }
+        // Bind/unbind convergence polling: runs even during the RF settle window
+        // so that bind convergence is not blocked by a prior RGB upload.
+        if in_settle && self.pending_op.is_some()
+            && due(self.last_poll, now, Duration::from_millis(self.cfg.observation.poll_ms))
+        {
+            self.last_poll = Some(now);
+            out.polled = true;
+            self.poll_devices(now);
+        }
+        if self.pending_op.is_some() {
+            self.check_bind_convergence(now);
         }
         if out.polled {
             out.uploaded_rgb = self.rgb_tick(now);
@@ -502,7 +533,7 @@ impl<T: UsbIo> Supervisor<T> {
                         info!("RGB asserted for {}", rec.mac_str());
                         // Hold RF traffic for RGB_SETTLE so the firmware's
                         // flash-commit window gets the silence it needs.
-                        self.rgb_settle_until = Some(now + RGB_SETTLE);
+                        self.rf_settle_until = Some(now + RGB_SETTLE);
                     }
                     Err(e) => {
                         warn!("RGB upload failed for {}: {e}", rec.mac_str());
@@ -579,11 +610,16 @@ impl<T: UsbIo> Supervisor<T> {
     }
 
     fn answer(&mut self, req: crate::ipc::Request) -> crate::ipc::ResponseEnvelope {
-        use crate::ipc::{AirDeviceStatus, DeviceStatus, LinkStatus, Request, ResponseEnvelope, StatusData};
+        use crate::ipc::{AirDeviceStatus, DeviceStatus, LinkStatus, PendingOpStatus, Request, ResponseEnvelope, StatusData};
         match req {
             Request::Ping => ResponseEnvelope::ok(Some(serde_json::json!("pong"))),
             Request::Status => {
                 let now = Instant::now();
+                let pending = self.pending_op.as_ref().map(|op| PendingOpStatus {
+                    op: if op.unbind { "unbind".to_string() } else { "bind".to_string() },
+                    mac: mac_str(&op.mac),
+                    state: if op.failed_at.is_some() { "failed".to_string() } else { "converging".to_string() },
+                });
                 let data = StatusData {
                     daemon_version: env!("CARGO_PKG_VERSION").to_string(),
                     link: self.link.map(|l| LinkStatus {
@@ -626,6 +662,7 @@ impl<T: UsbIo> Supervisor<T> {
                             last_seen_s: now.duration_since(e.last_seen).as_secs(),
                         })
                         .collect(),
+                    pending,
                 };
                 match serde_json::to_value(&data) {
                     Ok(v) => ResponseEnvelope::ok(Some(v)),
@@ -638,7 +675,7 @@ impl<T: UsbIo> Supervisor<T> {
             },
             Request::SetConfig { config } => match config.validate() {
                 Ok(()) => {
-                    if let Err(e) = config.save(&crate::config::default_path()) {
+                    if let Err(e) = config.save(&self.config_path) {
                         return ResponseEnvelope::err(format!("save failed: {e}"));
                     }
                     self.apply_config(config);
@@ -654,7 +691,7 @@ impl<T: UsbIo> Supervisor<T> {
                     return ResponseEnvelope::err(format!("unknown device {mac}"));
                 };
                 dc.color = Some(crate::config::StaticColor { rgb, brightness });
-                if let Err(e) = self.cfg.save(&crate::config::default_path()) {
+                if let Err(e) = self.cfg.save(&self.config_path) {
                     return ResponseEnvelope::err(format!("save failed: {e}"));
                 }
                 // force re-assert on next rgb_tick
@@ -678,7 +715,7 @@ impl<T: UsbIo> Supervisor<T> {
                     return ResponseEnvelope::err(format!("unknown device {mac}"));
                 };
                 dc.effect = Some(effect);
-                if let Err(e) = new_cfg.save(&crate::config::default_path()) {
+                if let Err(e) = new_cfg.save(&self.config_path) {
                     return ResponseEnvelope::err(format!("save failed: {e}"));
                 }
                 // Save succeeded — swap in the new config.
@@ -692,6 +729,102 @@ impl<T: UsbIo> Supervisor<T> {
                 }
                 ResponseEnvelope::ok(None)
             }
+            Request::Bind { mac } => {
+                let Some(link) = self.link else {
+                    return ResponseEnvelope::err("no link");
+                };
+                let Ok(mac_bytes) = crate::config::parse_mac(&mac) else {
+                    return ResponseEnvelope::err(format!("invalid MAC: {mac}"));
+                };
+                let Some(air_entry) = self.air.get(&mac_bytes) else {
+                    return ResponseEnvelope::err("not visible on air");
+                };
+                match &air_entry.bond {
+                    Bond::Foreign => return ResponseEnvelope::err("bound to another controller — unbind it there first"),
+                    Bond::Ours => return ResponseEnvelope::err("already bound"),
+                    Bond::Unbound => {}
+                }
+                if let Some(op) = &self.pending_op {
+                    if op.failed_at.is_none() {
+                        return ResponseEnvelope::err("operation already in progress");
+                    }
+                }
+                // Compute target_rx from all air records
+                let air_records: Vec<_> = self.air.values().map(|e| e.record.clone()).collect();
+                let target_rx = llw_protocol::record::unused_rx(&air_records, &link.master_mac);
+                let current_pwm = air_entry.record.current_pwm;
+                let current_channel = air_entry.record.channel;
+                let current_rx = air_entry.record.rx_type;
+                let frame = llw_protocol::frames::bind_frame(
+                    &mac_bytes,
+                    &link.master_mac,
+                    target_rx,
+                    link.channel,
+                    &current_pwm,
+                );
+                let now = Instant::now();
+                if let Some(dongle) = self.dongle.as_mut() {
+                    if let Err(e) = dongle.send_bind_burst(&frame, current_channel, current_rx) {
+                        return ResponseEnvelope::err(format!("bind burst failed: {e}"));
+                    }
+                }
+                self.pending_op = Some(BindOp {
+                    mac: mac_bytes,
+                    unbind: false,
+                    target_rx,
+                    deadline: now + BIND_DEADLINE,
+                    bursts: 1,
+                    failed_at: None,
+                });
+                ResponseEnvelope::ok(Some(serde_json::json!({"state": "started"})))
+            }
+            Request::Unbind { mac } => {
+                let Some(link) = self.link else {
+                    return ResponseEnvelope::err("no link");
+                };
+                let Ok(mac_bytes) = crate::config::parse_mac(&mac) else {
+                    return ResponseEnvelope::err(format!("invalid MAC: {mac}"));
+                };
+                let Some(air_entry) = self.air.get(&mac_bytes) else {
+                    return ResponseEnvelope::err("not visible on air");
+                };
+                match &air_entry.bond {
+                    Bond::Ours => {}
+                    Bond::Foreign => return ResponseEnvelope::err("device is not bound to this controller"),
+                    Bond::Unbound => return ResponseEnvelope::err("device is not bound"),
+                }
+                if let Some(op) = &self.pending_op {
+                    if op.failed_at.is_none() {
+                        return ResponseEnvelope::err("operation already in progress");
+                    }
+                }
+                let current_pwm = air_entry.record.current_pwm;
+                let current_channel = air_entry.record.channel;
+                let current_rx = air_entry.record.rx_type;
+                let zero_master = [0u8; 6];
+                let frame = llw_protocol::frames::bind_frame(
+                    &mac_bytes,
+                    &zero_master,
+                    0,
+                    link.channel,
+                    &current_pwm,
+                );
+                let now = Instant::now();
+                if let Some(dongle) = self.dongle.as_mut() {
+                    if let Err(e) = dongle.send_bind_burst(&frame, current_channel, current_rx) {
+                        return ResponseEnvelope::err(format!("unbind burst failed: {e}"));
+                    }
+                }
+                self.pending_op = Some(BindOp {
+                    mac: mac_bytes,
+                    unbind: true,
+                    target_rx: 0,
+                    deadline: now + BIND_DEADLINE,
+                    bursts: 1,
+                    failed_at: None,
+                });
+                ResponseEnvelope::ok(Some(serde_json::json!({"state": "started"})))
+            }
         }
     }
 
@@ -704,6 +837,135 @@ impl<T: UsbIo> Supervisor<T> {
         self.devices = devices;
         if self.link.is_some() {
             self.reliability.on_acquired(Instant::now());
+        }
+    }
+
+    /// Called every step when a bind/unbind op is pending.
+    /// Checks the air inventory for convergence, re-bursts once on deadline,
+    /// and marks the op failed after the second deadline.
+    fn check_bind_convergence(&mut self, now: Instant) {
+        let Some(op) = self.pending_op.as_ref() else { return };
+
+        // Clear failed ops after BIND_FAIL_CLEAR (30s)
+        if let Some(failed_at) = op.failed_at {
+            if now.duration_since(failed_at) >= BIND_FAIL_CLEAR {
+                self.pending_op = None;
+            }
+            return;
+        }
+
+        let mac = op.mac;
+        let unbind = op.unbind;
+        let target_rx = op.target_rx;
+
+        // Check convergence from air inventory
+        let converged = if unbind {
+            match self.air.get(&mac) {
+                None => true,
+                Some(e) => e.bond == Bond::Unbound,
+            }
+        } else {
+            match self.air.get(&mac) {
+                Some(e) => e.bond == Bond::Ours && e.record.rx_type == target_rx,
+                None => false,
+            }
+        };
+
+        if converged {
+            let op = self.pending_op.take().unwrap();
+            let Some(link) = self.link else { return };
+            // Send save_config
+            if let Some(dongle) = self.dongle.as_mut() {
+                if let Err(e) = dongle.send_save_config(&link.master_mac, link.channel) {
+                    warn!("send_save_config failed after bind: {e}");
+                }
+            }
+            // Engage RF settle window to protect the flash-commit
+            self.rf_settle_until = Some(now + RGB_SETTLE);
+
+            let mac_str = mac_str(&op.mac);
+            if unbind {
+                self.cfg.devices.retain(|d| d.mac != mac_str);
+                self.devices.remove(&op.mac);
+                if let Err(e) = self.cfg.save(&self.config_path) {
+                    warn!("config save after unbind failed: {e}");
+                }
+                info!("unbind complete for {mac_str}");
+            } else {
+                let first_curve = self.cfg.curves.first().map(|c| c.name.clone());
+                let default_slot = match first_curve {
+                    Some(name) => SlotSpeed::Curve(name),
+                    None => SlotSpeed::Percent(40),
+                };
+                let new_dc = crate::config::DeviceConfig {
+                    mac: mac_str.clone(),
+                    name: None,
+                    slots: [
+                        default_slot.clone(),
+                        default_slot.clone(),
+                        default_slot.clone(),
+                        default_slot,
+                    ],
+                    color: None,
+                    effect: None,
+                };
+                self.cfg.devices.push(new_dc);
+                if let Err(e) = self.cfg.save(&self.config_path) {
+                    warn!("config save after bind failed: {e}");
+                }
+                self.devices.insert(
+                    op.mac,
+                    DeviceRuntime {
+                        mac: op.mac,
+                        desired: [0; 4],
+                        last_sent: None,
+                        filter: crate::observation::DropoutFilter::default(),
+                        expected_fx: None,
+                        last_rgb_upload: None,
+                        last_record: None,
+                    },
+                );
+                info!("bind complete for {mac_str}");
+            }
+            return;
+        }
+
+        // Check deadline — re-burst once, then mark failed
+        let op = self.pending_op.as_mut().unwrap();
+        if now >= op.deadline {
+            if op.bursts < 2 {
+                // Re-burst
+                let mac = op.mac;
+                let target_rx = op.target_rx;
+                if let (Some(air_entry), Some(link)) = (self.air.get(&mac).cloned(), self.link) {
+                    let zero_master = [0u8; 6];
+                    let target_master = if unbind { &zero_master } else { &link.master_mac };
+                    let target_rx_val = if unbind { 0u8 } else { target_rx };
+                    let frame = llw_protocol::frames::bind_frame(
+                        &mac,
+                        target_master,
+                        target_rx_val,
+                        link.channel,
+                        &air_entry.record.current_pwm,
+                    );
+                    if let Some(dongle) = self.dongle.as_mut() {
+                        if let Err(e) = dongle.send_bind_burst(
+                            &frame,
+                            air_entry.record.channel,
+                            air_entry.record.rx_type,
+                        ) {
+                            warn!("re-burst failed: {e}");
+                        }
+                    }
+                }
+                let op = self.pending_op.as_mut().unwrap();
+                op.bursts = 2;
+                op.deadline = now + BIND_DEADLINE;
+            } else {
+                warn!("bind op timed out for {}", mac_str(&mac));
+                let op = self.pending_op.as_mut().unwrap();
+                op.failed_at = Some(now);
+            }
         }
     }
 }
@@ -846,8 +1108,134 @@ mod tests {
                 Ok(Dongle::from_parts(FakeIo::default(), Some(rx)))
             }),
             None,
+            std::env::temp_dir().join("llw-daemon-test-config.json"),
         );
         (sup, Instant::now())
+    }
+
+    /// Build a supervisor with an explicit config path (for tests that verify saves).
+    #[allow(dead_code)]
+    fn sim_with_config(
+        cfg: Config,
+        rx_script: Vec<Vec<u8>>,
+        config_path: std::path::PathBuf,
+    ) -> (Supervisor<FakeIo>, Instant) {
+        let sup = Supervisor::new(
+            cfg,
+            std::env::temp_dir(),
+            Box::new(move || {
+                let rx = FakeIo::default();
+                for r in rx_script.clone() {
+                    rx.push_read(r);
+                }
+                Ok(Dongle::from_parts(FakeIo::default(), Some(rx)))
+            }),
+            None,
+            config_path,
+        );
+        (sup, Instant::now())
+    }
+
+    /// Build a supervisor with an explicit config path and IPC channel.
+    fn sim_with_ipc(
+        cfg: Config,
+        rx_script: Vec<Vec<u8>>,
+        config_path: std::path::PathBuf,
+    ) -> (Supervisor<FakeIo>, std::sync::mpsc::Sender<crate::ipc::IpcCmd>, Instant) {
+        let (ipc_tx, ipc_rx) = std::sync::mpsc::channel();
+        let sup = Supervisor::new(
+            cfg,
+            std::env::temp_dir(),
+            Box::new(move || {
+                let rx = FakeIo::default();
+                for r in rx_script.clone() {
+                    rx.push_read(r);
+                }
+                Ok(Dongle::from_parts(FakeIo::default(), Some(rx)))
+            }),
+            Some(ipc_rx),
+            config_path,
+        );
+        (sup, ipc_tx, Instant::now())
+    }
+
+    /// A FakeIo shared via Arc so tests can inspect TX writes after the
+    /// dongle has been moved into the supervisor.
+    #[derive(Clone, Default)]
+    struct SharedIo(std::sync::Arc<FakeIo>);
+
+    impl UsbIo for SharedIo {
+        fn write(&self, data: &[u8], timeout: Duration) -> llw_protocol::Result<usize> {
+            self.0.write(data, timeout)
+        }
+        fn read(&self, buf: &mut [u8], timeout: Duration) -> llw_protocol::Result<usize> {
+            self.0.read(buf, timeout)
+        }
+        fn read_flush(&self) {
+            self.0.read_flush()
+        }
+    }
+
+    /// Like `sim_with_ipc`, but the TX transport is shared out so tests can
+    /// assert on the exact USB packets the supervisor sends.
+    fn sim_with_ipc_shared_tx(
+        cfg: Config,
+        rx_script: Vec<Vec<u8>>,
+        config_path: std::path::PathBuf,
+    ) -> (
+        Supervisor<SharedIo>,
+        std::sync::mpsc::Sender<crate::ipc::IpcCmd>,
+        std::sync::Arc<FakeIo>,
+        Instant,
+    ) {
+        let (ipc_tx, ipc_rx) = std::sync::mpsc::channel();
+        let tx = std::sync::Arc::new(FakeIo::default());
+        let tx_in = std::sync::Arc::clone(&tx);
+        let sup = Supervisor::new(
+            cfg,
+            std::env::temp_dir(),
+            Box::new(move || {
+                let rx = FakeIo::default();
+                for r in rx_script.clone() {
+                    rx.push_read(r);
+                }
+                Ok(Dongle::from_parts(
+                    SharedIo(std::sync::Arc::clone(&tx_in)),
+                    Some(SharedIo(std::sync::Arc::new(rx))),
+                ))
+            }),
+            Some(ipc_rx),
+            config_path,
+        );
+        (sup, ipc_tx, tx, Instant::now())
+    }
+
+    /// Collect the USB packets of all RF frames whose rf[1] equals `kind`,
+    /// optionally restricted to frames addressed to one device MAC (rf[2..8]).
+    /// Frames are 4-chunk groups; chunk 0 carries rf[0..60] at packet[4..64],
+    /// so the frame kind is packet[5] and the device MAC is packet[6..12].
+    fn frames_of_kind(writes: &[Vec<u8>], kind: u8, mac: Option<&[u8; 6]>) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < writes.len() {
+            let w = &writes[i];
+            if w.len() == 64
+                && w[0] == 0x10
+                && w[1] == 0
+                && w[5] == kind
+                && mac.is_none_or(|m| &w[6..12] == m)
+            {
+                for j in 0..4 {
+                    if let Some(p) = writes.get(i + j) {
+                        out.push(p.clone());
+                    }
+                }
+                i += 4;
+            } else {
+                i += 1;
+            }
+        }
+        out
     }
 
     #[test]
@@ -959,6 +1347,7 @@ mod tests {
                 Ok(Dongle::from_parts(FakeIo::default(), Some(rx)))
             }),
             None,
+            std::env::temp_dir().join("llw-daemon-test-config.json"),
         );
         let t0 = Instant::now();
         let mut saw_tier1 = false;
@@ -998,6 +1387,7 @@ mod tests {
                 Err(llw_protocol::ProtocolError::DeviceNotFound { vid: 0x0416, pid: 0x8040 })
             }),
             None,
+            std::env::temp_dir().join("llw-daemon-test-config.json"),
         );
         let t0 = Instant::now();
         // First step at t0: connector called once, wedge asserted.
@@ -1058,6 +1448,7 @@ mod tests {
                 Ok(Dongle::from_parts(FakeIo::default(), Some(rx)))
             }),
             None,
+            std::env::temp_dir().join("llw-daemon-test-config.json"),
         );
         (sup, Instant::now())
     }
@@ -1214,6 +1605,7 @@ mod tests {
                 Ok(Dongle::from_parts(tx, Some(rx)))
             }),
             None,
+            std::env::temp_dir().join("llw-daemon-test-config.json"),
         );
         let t0 = Instant::now();
 
@@ -1607,5 +1999,513 @@ mod tests {
         // The device runtime must have last_record set (existing behaviour)
         let dev = sup.devices.get(&MAC).unwrap();
         assert!(dev.last_record.is_some(), "last_record must still be updated");
+    }
+
+    // ── Bind/Unbind IPC tests ─────────────────────────────────────────────────
+
+    /// MAC for the device being bound (different from MAC which is already configured).
+    const BIND_MAC: [u8; 6] = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02];
+
+    /// Helper: build the base config for bind tests (no color → no RGB settle window,
+    /// no curves → bind creates Percent(40) slots).
+    fn bind_test_config() -> Config {
+        let mut cfg = Config::new();
+        cfg.observation.poll_ms = 0;
+        cfg.control.tick_ms = 10_000;
+        cfg.control.keepalive_ms = 10_000;
+        cfg.devices.push(DeviceConfig {
+            mac: "02:8b:51:62:32:e1".into(),
+            name: None,
+            slots: [
+                SlotSpeed::Percent(40),
+                SlotSpeed::Percent(40),
+                SlotSpeed::Percent(40),
+                SlotSpeed::Percent(0),
+            ],
+            color: None, // no RGB → no settle window
+            effect: None,
+        });
+        cfg
+    }
+
+    /// Refusals: Bind on invalid MAC, not-visible, already-bound (Ours), foreign.
+    #[test]
+    fn bind_refusals() {
+        let zero_master = [0u8; 6];
+        let foreign_master: [u8; 6] = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01];
+        let foreign_mac: [u8; 6] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01];
+
+        let rec_ours = air_record_bytes(MAC, MASTER, [0; 4]);
+        let rec_unbound = air_record_bytes(BIND_MAC, zero_master, [0; 4]);
+        let rec_foreign = air_record_bytes(foreign_mac, foreign_master, [0; 4]);
+        let combined = getdev_resp_multi(&[rec_ours, rec_unbound, rec_foreign]);
+        let script = vec![combined; 10];
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let (mut sup, ipc_tx, t0) = sim_with_ipc(bind_test_config(), script, config_path);
+
+        // Step 1: acquire
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+        assert_eq!(sup.air.len(), 3);
+
+        // Bind with invalid MAC → rejected
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "not-a-mac".to_string() },
+            reply: reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        let resp = reply_rx.try_recv().unwrap();
+        assert!(!resp.ok);
+        assert!(resp.error.as_ref().unwrap().contains("invalid MAC"), "got: {:?}", resp.error);
+
+        // Bind invisible device → rejected
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "11:22:33:44:55:66".to_string() },
+            reply: reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(2));
+        let resp = reply_rx.try_recv().unwrap();
+        assert!(!resp.ok);
+        assert!(resp.error.as_ref().unwrap().contains("not visible"), "got: {:?}", resp.error);
+
+        // Bind already-Ours device → rejected
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "02:8b:51:62:32:e1".to_string() },
+            reply: reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(3));
+        let resp = reply_rx.try_recv().unwrap();
+        assert!(!resp.ok);
+        assert!(resp.error.as_ref().unwrap().contains("already bound"), "got: {:?}", resp.error);
+
+        // Bind Foreign device → rejected
+        let foreign_mac_str = format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            foreign_mac[0], foreign_mac[1], foreign_mac[2],
+            foreign_mac[3], foreign_mac[4], foreign_mac[5]);
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: foreign_mac_str },
+            reply: reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(4));
+        let resp = reply_rx.try_recv().unwrap();
+        assert!(!resp.ok);
+        assert!(resp.error.as_ref().unwrap().contains("another controller"), "got: {:?}", resp.error);
+    }
+
+    /// Refusals: Unbind on not-ours.
+    #[test]
+    fn unbind_refusals() {
+        let zero_master = [0u8; 6];
+        let rec_ours = air_record_bytes(MAC, MASTER, [0; 4]);
+        let rec_unbound = air_record_bytes(BIND_MAC, zero_master, [0; 4]);
+        let combined = getdev_resp_multi(&[rec_ours, rec_unbound]);
+        let script = vec![combined; 8];
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let (mut sup, ipc_tx, t0) = sim_with_ipc(bind_test_config(), script, config_path);
+
+        // Acquire
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+
+        // Unbind an Unbound device → rejected
+        let bind_mac_str = "de:ad:be:ef:01:02";
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Unbind { mac: bind_mac_str.to_string() },
+            reply: reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        let resp = reply_rx.try_recv().unwrap();
+        assert!(!resp.ok);
+        assert!(resp.error.as_ref().unwrap().contains("not bound"), "got: {:?}", resp.error);
+
+        // Unbind invisible MAC → rejected
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Unbind { mac: "11:22:33:44:55:66".to_string() },
+            reply: reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(2));
+        let resp = reply_rx.try_recv().unwrap();
+        assert!(!resp.ok);
+        assert!(resp.error.as_ref().unwrap().contains("not visible"), "got: {:?}", resp.error);
+    }
+
+    /// Happy path: Bind succeeds → pending_op set → convergence detected → config saved.
+    #[test]
+    fn bind_success_converges_and_saves_config() {
+        let zero_master = [0u8; 6];
+        // MAC with rx_type=1 (set in air_record_bytes at r[13]=1), so target_rx should be 2
+        let rec_ours = air_record_bytes(MAC, MASTER, [0; 4]); // rx_type = 1 (r[13])
+        let rec_unbound = air_record_bytes(BIND_MAC, zero_master, [0; 4]); // rx_type = 1
+
+        // After bind, BIND_MAC shows bound to MASTER with rx_type=2 (target_rx)
+        let rec_bound = {
+            let mut r = air_record_bytes(BIND_MAC, MASTER, [0; 4]);
+            r[13] = 2; // rx_type = 2 = target_rx (1 was taken by MAC)
+            r
+        };
+
+        let initial = getdev_resp_multi(&[rec_ours, rec_unbound]);
+        let converged = getdev_resp_multi(&[rec_ours, rec_bound]);
+
+        // Script: acquire + 2 polls at initial, then converged records
+        let mut script = vec![initial; 3];
+        script.extend(vec![converged; 6]);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let (mut sup, ipc_tx, t0) = sim_with_ipc(bind_test_config(), script, config_path.clone());
+
+        // Step 1: acquire
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+        assert_eq!(sup.air.len(), 2, "both devices on air");
+
+        // Queue Bind command — will be drained in next step
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "de:ad:be:ef:01:02".to_string() },
+            reply: reply_tx,
+        }).unwrap();
+
+        // Step 2: drains IPC → processes Bind, sends burst, sets pending_op
+        // (still polls initial records — not converged yet)
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        let resp = reply_rx.try_recv().unwrap();
+        assert!(resp.ok, "bind must be accepted: {:?}", resp.error);
+        assert_eq!(resp.data.as_ref().and_then(|v| v.get("state")).and_then(|v| v.as_str()), Some("started"));
+        assert!(sup.pending_op.is_some(), "pending_op must be set");
+        let op = sup.pending_op.as_ref().unwrap();
+        assert!(!op.unbind, "must be a bind op");
+        assert_eq!(op.target_rx, 2, "target_rx should be 2 (slot 1 taken by MAC)");
+
+        // Step 3: polls initial records again (script[2]) — still not converged
+        let _ = sup.step(t0 + Duration::from_secs(2));
+        // Step 4: polls converged records (script[3]) — convergence detected
+        let _ = sup.step(t0 + Duration::from_secs(3));
+
+        // pending_op should be cleared after convergence
+        assert!(
+            sup.pending_op.is_none(),
+            "pending_op must be cleared after convergence"
+        );
+
+        // Config must have BIND_MAC entry (auto-added with Percent(40) slots since no curves)
+        let saved = crate::config::Config::load(&config_path).unwrap();
+        assert!(
+            saved.devices.iter().any(|d| d.mac == "de:ad:be:ef:01:02"),
+            "bind device must be in saved config"
+        );
+        let dc = saved.devices.iter().find(|d| d.mac == "de:ad:be:ef:01:02").unwrap();
+        assert!(
+            dc.slots.iter().all(|s| *s == SlotSpeed::Percent(40)),
+            "bind device must have Percent(40) slots (no curves in config)"
+        );
+
+        // DeviceRuntime must have BIND_MAC
+        assert!(
+            sup.devices.contains_key(&BIND_MAC),
+            "runtime must have BIND_MAC after bind"
+        );
+    }
+
+    /// Byte-level verification of the bind path: the burst is exactly 6×4 USB
+    /// writes addressed to the record's CURRENT channel+rx, carrying a bind
+    /// frame that targets OUR master at the computed target_rx with the
+    /// device's current PWM passed through; save-config (3×4 writes, rx 0xFF)
+    /// follows convergence — and only convergence.
+    #[test]
+    fn bind_burst_and_save_config_bytes() {
+        let zero_master = [0u8; 6];
+        let rec_ours = air_record_bytes(MAC, MASTER, [0; 4]); // rx_type=1, channel=2
+        let rec_unbound = air_record_bytes(BIND_MAC, zero_master, [55, 66, 77, 0]);
+        let rec_bound = {
+            let mut r = air_record_bytes(BIND_MAC, MASTER, [55, 66, 77, 0]);
+            r[13] = 2; // rx_type = target_rx
+            r
+        };
+        let initial = getdev_resp_multi(&[rec_ours, rec_unbound]);
+        let converged = getdev_resp_multi(&[rec_ours, rec_bound]);
+        let mut script = vec![initial; 2]; // acquire + bind-step poll
+        script.extend(vec![converged; 6]);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let (mut sup, ipc_tx, tx, t0) =
+            sim_with_ipc_shared_tx(bind_test_config(), script, config_path);
+
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+
+        let mark = tx.written().len();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "de:ad:be:ef:01:02".into() },
+            reply: reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        assert!(reply_rx.try_recv().unwrap().ok, "bind must be accepted");
+
+        // The bind burst: 24 writes (6 frames × 4 chunks), USB-addressed to
+        // the record's CURRENT channel (2) and rx_type (1). Heartbeat frames
+        // (rf[1]=0x14) and the configured device's PWM frame (0x10 but a
+        // different device MAC) on the same transport are filtered out.
+        let all = tx.written();
+        let bind_writes = frames_of_kind(&all[mark..], 0x10, Some(&BIND_MAC));
+        assert_eq!(bind_writes.len(), 24, "bind burst must be exactly 6×4=24 USB writes");
+        for (i, w) in bind_writes.iter().enumerate() {
+            assert_eq!(w[2], 2, "packet[{i}][2] must be the record's CURRENT channel");
+            assert_eq!(w[3], 1, "packet[{i}][3] must be the record's CURRENT rx_type");
+        }
+        // Pin the RF payload via chunk 0 of the first frame (rf[n] = packet[4+n]).
+        let first = &bind_writes[0];
+        assert_eq!(first[4], 0x12, "rf[0] = RF_SELECT");
+        assert_eq!(first[5], 0x10, "rf[1] = RF_PWM_CMD (bind reuses the layout)");
+        assert_eq!(&first[6..12], &BIND_MAC, "rf[2..8] = device MAC");
+        assert_eq!(&first[12..18], &MASTER, "rf[8..14] = OUR master (bind target)");
+        assert_eq!(first[18], 2, "rf[14] = target_rx");
+        assert_eq!(first[19], 2, "rf[15] = master channel");
+        assert_eq!(first[20], 2, "rf[16] = target_rx (seq-byte reuse)");
+        assert_eq!(&first[21..25], &[55, 66, 77, 0], "rf[17..21] = current PWM passthrough");
+        assert!(
+            frames_of_kind(&all[mark..], 0x15, None).is_empty(),
+            "no save-config before convergence"
+        );
+
+        // Convergence step: record flips to our-master + target_rx.
+        let mark = tx.written().len();
+        let _ = sup.step(t0 + Duration::from_secs(2));
+        assert!(sup.pending_op.is_none(), "must converge");
+        let all = tx.written();
+        let save_writes = frames_of_kind(&all[mark..], 0x15, None);
+        assert_eq!(save_writes.len(), 12, "save-config must be exactly 3×4=12 USB writes");
+        for (i, w) in save_writes.iter().enumerate() {
+            assert_eq!(w[2], 2, "save packet[{i}][2] must be the master channel");
+            assert_eq!(w[3], 0xFF, "save packet[{i}][3] must be 0xFF");
+        }
+    }
+
+    /// A second bind/unbind while one op is pending must be refused.
+    #[test]
+    fn bind_concurrent_op_refusal() {
+        let zero_master = [0u8; 6];
+        let second_mac: [u8; 6] = [0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x01];
+        let rec_ours = air_record_bytes(MAC, MASTER, [0; 4]);
+        let rec_unbound_a = air_record_bytes(BIND_MAC, zero_master, [0; 4]);
+        let rec_unbound_b = air_record_bytes(second_mac, zero_master, [0; 4]);
+        let combined = getdev_resp_multi(&[rec_ours, rec_unbound_a, rec_unbound_b]);
+        let script = vec![combined; 10];
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let (mut sup, ipc_tx, t0) = sim_with_ipc(bind_test_config(), script, config_path);
+
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+
+        // Queue three commands: the first bind is accepted; the second bind
+        // (different device) and an unbind must both be refused while the
+        // first op is pending. drain_ipc processes all three in one step.
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "de:ad:be:ef:01:02".into() },
+            reply: reply_tx,
+        }).unwrap();
+        let (reply_tx2, reply_rx2) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "ca:fe:ba:be:00:01".into() },
+            reply: reply_tx2,
+        }).unwrap();
+        let (reply_tx3, reply_rx3) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Unbind { mac: "02:8b:51:62:32:e1".into() },
+            reply: reply_tx3,
+        }).unwrap();
+
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        let resp = reply_rx.try_recv().unwrap();
+        assert!(resp.ok, "first bind must be accepted: {:?}", resp.error);
+        let resp2 = reply_rx2.try_recv().unwrap();
+        assert!(!resp2.ok, "second bind must be refused while an op is pending");
+        assert!(
+            resp2.error.as_ref().unwrap().contains("already in progress"),
+            "got: {:?}", resp2.error
+        );
+        let resp3 = reply_rx3.try_recv().unwrap();
+        assert!(!resp3.ok, "unbind must be refused while an op is pending");
+        assert!(
+            resp3.error.as_ref().unwrap().contains("already in progress"),
+            "got: {:?}", resp3.error
+        );
+    }
+
+    /// Happy path: Unbind succeeds → pending_op set → convergence detected → config saved.
+    #[test]
+    fn unbind_success_converges_and_removes_from_config() {
+        // MAC is pre-configured (Ours) — we will unbind it.
+        let rec_ours = air_record_bytes(MAC, MASTER, [0; 4]);
+
+        // After unbind, MAC shows with zero master (Unbound)
+        let zero_master = [0u8; 6];
+        let rec_unbound = air_record_bytes(MAC, zero_master, [0; 4]);
+
+        let initial = getdev_resp_multi(&[rec_ours]);
+        let converged = getdev_resp_multi(&[rec_unbound]);
+
+        let mut script = vec![initial; 3];
+        script.extend(vec![converged; 6]);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let (mut sup, ipc_tx, t0) = sim_with_ipc(bind_test_config(), script, config_path.clone());
+
+        // Acquire
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+        assert_eq!(sup.air.get(&MAC).unwrap().bond, Bond::Ours);
+
+        // Queue Unbind
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Unbind { mac: "02:8b:51:62:32:e1".to_string() },
+            reply: reply_tx,
+        }).unwrap();
+
+        // Step: process Unbind
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        let resp = reply_rx.try_recv().unwrap();
+        assert!(resp.ok, "unbind must be accepted: {:?}", resp.error);
+        assert!(sup.pending_op.is_some(), "pending_op must be set");
+
+        // Step 3: polls initial records (script[2]) — still not converged
+        let _ = sup.step(t0 + Duration::from_secs(2));
+        // Step 4: polls converged records (script[3]) — convergence detected
+        let _ = sup.step(t0 + Duration::from_secs(3));
+        assert!(sup.pending_op.is_none(), "pending_op must be cleared after convergence");
+
+        // Config must have MAC removed
+        let saved = crate::config::Config::load(&config_path).unwrap();
+        assert!(
+            !saved.devices.iter().any(|d| d.mac == "02:8b:51:62:32:e1"),
+            "unbound device must be removed from saved config"
+        );
+
+        // DeviceRuntime must be gone
+        assert!(
+            !sup.devices.contains_key(&MAC),
+            "runtime must not have MAC after unbind"
+        );
+    }
+
+    /// Bind times out (no convergence) → op marked failed, then auto-cleared after 30s.
+    #[test]
+    fn bind_timeout_marks_failed_then_clears() {
+        let zero_master = [0u8; 6];
+        let rec_ours = air_record_bytes(MAC, MASTER, [0; 4]);
+        let rec_unbound = air_record_bytes(BIND_MAC, zero_master, [0; 4]);
+
+        // BIND_MAC never converges — stays unbound forever
+        let combined = getdev_resp_multi(&[rec_ours, rec_unbound]);
+        let script = vec![combined; 30];
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let (mut sup, ipc_tx, t0) = sim_with_ipc(bind_test_config(), script, config_path.clone());
+
+        // Acquire
+        let out = sup.step(t0);
+        assert!(out.acquired);
+
+        // Queue Bind
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "de:ad:be:ef:01:02".to_string() },
+            reply: reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        let resp = reply_rx.try_recv().unwrap();
+        assert!(resp.ok, "bind must be accepted initially");
+
+        // Step past BIND_DEADLINE (5s) + re-burst + second deadline → must fail
+        let _ = sup.step(t0 + Duration::from_secs(7));  // past first deadline
+        let _ = sup.step(t0 + Duration::from_secs(13)); // past second deadline → failed
+        assert!(
+            sup.pending_op.as_ref().map(|o| o.failed_at.is_some()).unwrap_or(false),
+            "op must be marked failed after two deadlines"
+        );
+
+        // A failed bind must leave NO trace: no runtime, no in-memory config
+        // entry, and nothing saved to disk.
+        assert!(
+            !sup.devices.contains_key(&BIND_MAC),
+            "failed bind must not create a DeviceRuntime"
+        );
+        assert!(
+            !sup.cfg.devices.iter().any(|d| d.mac == "de:ad:be:ef:01:02"),
+            "failed bind must not add an in-memory config entry"
+        );
+        let saved = crate::config::Config::load(&config_path).unwrap();
+        assert!(
+            !saved.devices.iter().any(|d| d.mac == "de:ad:be:ef:01:02"),
+            "failed bind must not persist a config entry"
+        );
+
+        // BIND_FAIL_CLEAR after 30s: op is auto-cleared
+        let _ = sup.step(t0 + Duration::from_secs(44)); // 13 + 31 > 30s clear window
+        assert!(
+            sup.pending_op.is_none(),
+            "failed op must be auto-cleared after 30s"
+        );
+    }
+
+    /// Status IPC response includes the pending op field.
+    #[test]
+    fn status_includes_pending_op() {
+        let zero_master = [0u8; 6];
+        let rec_ours = air_record_bytes(MAC, MASTER, [0; 4]);
+        let rec_unbound = air_record_bytes(BIND_MAC, zero_master, [0; 4]);
+        let combined = getdev_resp_multi(&[rec_ours, rec_unbound]);
+        let script = vec![combined; 10];
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let (mut sup, ipc_tx, t0) = sim_with_ipc(bind_test_config(), script, config_path);
+
+        // Acquire
+        let _ = sup.step(t0);
+
+        // Queue Bind
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "de:ad:be:ef:01:02".to_string() },
+            reply: reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        let _ = reply_rx.try_recv().unwrap(); // consume bind reply
+
+        // Now send Status and check it shows pending
+        let (status_reply_tx, status_reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Status,
+            reply: status_reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(2));
+        let status_resp = status_reply_rx.try_recv().unwrap();
+        assert!(status_resp.ok);
+        let data = status_resp.data.unwrap();
+        let pending = data.get("pending").unwrap();
+        assert!(!pending.is_null(), "pending must not be null while bind is in progress");
+        assert_eq!(pending.get("op").and_then(|v| v.as_str()), Some("bind"));
+        assert_eq!(pending.get("state").and_then(|v| v.as_str()), Some("converging"));
+        assert_eq!(pending.get("mac").and_then(|v| v.as_str()), Some("de:ad:be:ef:01:02"));
     }
 }
