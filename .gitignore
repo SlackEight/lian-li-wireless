@@ -1,3 +1,5 @@
 /target
 /.upstream
 /.superpowers
+crates/llw-ui/ui/node_modules
+crates/llw-ui/ui/dist
