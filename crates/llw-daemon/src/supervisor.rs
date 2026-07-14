@@ -23,6 +23,20 @@ use tracing::{debug, info, warn};
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const RGB_REUPLOAD_COOLDOWN: Duration = Duration::from_secs(5);
+/// After a successful RGB upload the supervisor holds RF traffic (GetDev polls,
+/// PWM keepalives, heartbeat) for this long so the firmware can commit the
+/// flash-write without interference.
+///
+/// Diagnosis: the standalone probe (which stays silent for ~3s after upload)
+/// always sticks; the daemon (which resumes 500ms polls and 1s keepalives
+/// immediately) never sticks — the RF traffic during the firmware's flash-commit
+/// window aborts the store, producing the observed 5s drift-retry loop.
+///
+/// Keepalive-gap trade-off: a 3s PWM gap may cause a transient fan-speed revert
+/// (fans can surge 1-2s during an RGB change) — this is accepted because RGB
+/// changes are rare and user-initiated; the alternative (animations never
+/// sticking) is worse.
+const RGB_SETTLE: Duration = Duration::from_secs(3);
 /// Failsafe engages when a sensor has been unreadable this long — or immediately if it has never produced a reading.
 const SENSOR_FAILSAFE_AFTER: Duration = Duration::from_secs(60);
 
@@ -72,6 +86,10 @@ pub struct Supervisor<T: UsbIo> {
     last_poll: Option<Instant>,
     last_fan_tick: Option<Instant>,
     last_heartbeat: Option<Instant>,
+    /// Set after each successful RGB upload; poll_devices, fan_tick, and
+    /// send_heartbeat are skipped until this instant passes, giving the
+    /// firmware's flash-commit window the RF silence it needs.
+    rgb_settle_until: Option<Instant>,
     pub tx_wedged: bool,
 }
 
@@ -98,6 +116,7 @@ impl<T: UsbIo> Supervisor<T> {
             last_poll: None,
             last_fan_tick: None,
             last_heartbeat: None,
+            rgb_settle_until: None,
             tx_wedged: false,
         }
     }
@@ -118,18 +137,29 @@ impl<T: UsbIo> Supervisor<T> {
             // scripts deterministic.
             return out;
         }
-        if due(self.last_poll, now, Duration::from_millis(self.cfg.observation.poll_ms)) {
-            self.last_poll = Some(now);
-            out.polled = true;
-            self.poll_devices(now);
+        // Check whether the post-upload RF-silence window has expired.
+        if self.rgb_settle_until.is_some_and(|u| now >= u) {
+            self.rgb_settle_until = None;
         }
-        if due(self.last_fan_tick, now, Duration::from_millis(self.cfg.control.tick_ms)) {
-            self.last_fan_tick = Some(now);
-            out.sent_pwm = self.fan_tick(now);
-        }
-        if due(self.last_heartbeat, now, HEARTBEAT_INTERVAL) {
-            self.last_heartbeat = Some(now);
-            out.sent_heartbeat = self.send_heartbeat();
+        let in_settle = self.rgb_settle_until.is_some();
+
+        // poll_devices, fan_tick, and send_heartbeat are suppressed during
+        // the settle window (last_* stamps are NOT updated so they fire
+        // naturally once the window closes).
+        if !in_settle {
+            if due(self.last_poll, now, Duration::from_millis(self.cfg.observation.poll_ms)) {
+                self.last_poll = Some(now);
+                out.polled = true;
+                self.poll_devices(now);
+            }
+            if due(self.last_fan_tick, now, Duration::from_millis(self.cfg.control.tick_ms)) {
+                self.last_fan_tick = Some(now);
+                out.sent_pwm = self.fan_tick(now);
+            }
+            if due(self.last_heartbeat, now, HEARTBEAT_INTERVAL) {
+                self.last_heartbeat = Some(now);
+                out.sent_heartbeat = self.send_heartbeat();
+            }
         }
         if out.polled {
             out.uploaded_rgb = self.rgb_tick(now);
@@ -417,6 +447,9 @@ impl<T: UsbIo> Supervisor<T> {
                         dev.last_rgb_upload = Some(now);
                         uploads += 1;
                         info!("RGB asserted for {}", rec.mac_str());
+                        // Hold RF traffic for RGB_SETTLE so the firmware's
+                        // flash-commit window gets the silence it needs.
+                        self.rgb_settle_until = Some(now + RGB_SETTLE);
                     }
                     Err(e) => {
                         warn!("RGB upload failed for {}: {e}", rec.mac_str());
@@ -1257,5 +1290,68 @@ mod tests {
         );
         // The 24-frame animation is genuinely multi-frame.
         assert!(ripple_frame_count >= 24, "ripple must be at least 24 frames");
+    }
+
+    /// RGB settle window: after a successful upload the supervisor must NOT
+    /// send any RF traffic (polls, PWM, heartbeat) for RGB_SETTLE (3s).
+    ///
+    /// Uses poll_ms=0 / tick_ms=0 so that the suppression — not the interval
+    /// gating — is provably the cause of the silence.
+    #[test]
+    fn rgb_settle_window_suppresses_rf_traffic() {
+        // Static-color config so rgb_tick fires on the first poll.
+        let mut cfg = test_config(); // color: Some(white)
+        cfg.observation.poll_ms = 0; // poll every step
+        cfg.control.tick_ms = 0; // fan tick every step
+        cfg.control.keepalive_ms = 0; // heartbeat every step (per-step minimum)
+
+        // Healthy record: fx=[0;4] so expected_fx=None → upload on first poll.
+        let rec = record_bytes([102, 102, 102, 0], [0; 4]);
+        // Enough reads for acquisition + many post-upload steps.
+        let script = vec![getdev_resp(&[rec]); 20];
+        let (mut sup, t0) = sim(cfg, script);
+
+        // Step 1 — connect + acquire.
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+
+        // Step 2 (T = t0+1s) — first poll: RGB uploads, settle window opens.
+        let t_upload = t0 + Duration::from_secs(1);
+        let out = sup.step(t_upload);
+        assert!(out.polled, "must poll on step 2");
+        assert_eq!(out.uploaded_rgb, 1, "must upload RGB at T");
+        // Fan tick and heartbeat may also fire on this step (settle not yet active).
+
+        // Steps within (T, T+3s) — settle window active: no polls, no PWM, no heartbeat.
+        for ms in [500u64, 1000, 1500, 2000, 2500, 2900] {
+            let now = t_upload + Duration::from_millis(ms);
+            let out = sup.step(now);
+            assert!(
+                !out.polled,
+                "poll must be suppressed at T+{ms}ms (settle window)"
+            );
+            assert_eq!(
+                out.sent_pwm, 0,
+                "PWM must be suppressed at T+{ms}ms (settle window)"
+            );
+            assert!(
+                !out.sent_heartbeat,
+                "heartbeat must be suppressed at T+{ms}ms (settle window)"
+            );
+            assert_eq!(
+                out.uploaded_rgb, 0,
+                "no RGB re-upload during settle window at T+{ms}ms"
+            );
+        }
+
+        // Step at T+3.5s — settle window expired: polls and PWM resume.
+        // (heartbeat interval is 1s; last_heartbeat was set at T or earlier,
+        // so ≥3.5s later it is also due.)
+        let out = sup.step(t_upload + Duration::from_millis(3500));
+        assert!(out.polled, "poll must resume after settle window (T+3500ms)");
+        assert!(
+            out.sent_pwm > 0 || out.sent_heartbeat,
+            "PWM or heartbeat must resume after settle window (T+3500ms)"
+        );
     }
 }
