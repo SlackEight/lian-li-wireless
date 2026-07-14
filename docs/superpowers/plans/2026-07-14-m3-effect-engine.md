@@ -170,3 +170,22 @@ The M1-deferred experiment: find the firmware's animation storage ceiling per fa
 - **Spec coverage:** §3.2 geometry-abstract effects (T1-T4: 8 of the catalog incl. the M3-gate set), §5 compile-to-onboard flow (T5), the probe (T8 — spec's "known unknown"), UI-shared rendering (pure crate — M4 consumes as-is). Full catalog completion remains M5 per spec.
 - **Types:** EffectSpec serde shapes shared config/IPC/CLI (single definition in llw-effects); Geometry::of bridges protocol types in the daemon (llw-effects stays dependency-free). rgb_assert's static path untouched — effect and color coexist with documented precedence.
 - **Judgment calls:** effect math is locked-for-v1 to keep tuning centralized post-gate; Ripple pulses all fans in phase (variant knobs are M5+ scope); Breathing's palette-drift semantics chosen over per-period color stepping (single-period animations can't express cross-period state); probe uses a hidden CLI subcommand rather than daemon IPC to keep upload-failure blast-radius away from the soak.
+
+---
+
+## Task 7+8 hardware results (2026-07-14)
+
+**Task 7 (live fire):** Ripple PASS (blue/purple pulse looping; first upload lost to ch8 packet loss, drift-restore re-uploaded automatically — self-heal proven in production). Rainbow: correct on inner ring, mirrored on outer-left — cause discovered: SL-INF wiring is 5 segments, not a uniform ring. Meteor used as wiring probe.
+
+**SL-INF 44-LED physical layout (chase-probed, counts user-verified):**
+| idx | segment | count | path |
+|-----|---------|-------|------|
+| 0-7 | inner ring | 8 | full circle clockwise from left-middle |
+| 8-17 | outer LEFT arc | 10 | bottom → top |
+| 18-25 | LEFT side strip | 8 | bottom → top |
+| 26-35 | outer RIGHT arc | 10 | bottom → top |
+| 36-43 | RIGHT side strip | 8 | bottom → top |
+
+**Task 8 (flash probe, Rainbow @ 132 LEDs):** 32/64/96 frames PASS; 112/128 FAIL (firmware wipes fx to all-zero — fails safe, drift-detectable). Ceiling ≈ 38-44KB RAW (likely 40KB); protocol max (55.8KB compressed) is NOT the binding limit. Budget decision: byte-based — RAW_BYTE_BUDGET = 28,000 (≈75% of measured floor), frames = min(96, budget/(leds×3)), floor 8. → 132 LEDs: 70 frames; 174-LED Strimer: 53 frames.
+
+**Bonus observation:** master hopped ch8 → ch2 spontaneously between the morning boot and this session — first direct evidence for the settles-away-from-congestion hypothesis (soak note).
