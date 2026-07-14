@@ -233,28 +233,28 @@ impl Config {
                 }
             }
             if let Some(eff) = &dev.effect {
-                if eff.speed == 0 || eff.speed > 5 {
-                    bail!(
-                        "device {} effect speed {} out of range 1-5",
-                        dev.mac, eff.speed
-                    );
-                }
-                if eff.brightness > 4 {
-                    bail!(
-                        "device {} effect brightness {} out of range 0-4",
-                        dev.mac, eff.brightness
-                    );
-                }
-                if eff.colors.len() > 8 {
-                    bail!(
-                        "device {} effect palette has {} entries (max 8)",
-                        dev.mac, eff.colors.len()
-                    );
-                }
+                validate_effect(eff)
+                    .with_context(|| format!("device {} effect", dev.mac))?;
             }
         }
         Ok(())
     }
+}
+
+/// Validate an [`llw_effects::EffectSpec`] in isolation (speed, brightness, palette size).
+/// Called from [`Config::validate`] and from the IPC `SetEffect` handler so the rules
+/// can never drift between config-load and runtime.
+pub fn validate_effect(spec: &llw_effects::EffectSpec) -> Result<()> {
+    if spec.speed == 0 || spec.speed > 5 {
+        bail!("effect speed {} out of range 1-5", spec.speed);
+    }
+    if spec.brightness > 4 {
+        bail!("effect brightness {} out of range 0-4", spec.brightness);
+    }
+    if spec.colors.len() > 8 {
+        bail!("effect palette has {} entries (max 8)", spec.colors.len());
+    }
+    Ok(())
 }
 
 pub fn parse_mac(s: &str) -> Result<[u8; 6]> {

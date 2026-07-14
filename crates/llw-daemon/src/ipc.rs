@@ -34,6 +34,7 @@ pub enum Request {
     GetConfig,
     SetConfig { config: Config },
     SetColor { mac: String, rgb: [u8; 3], brightness: u8 },
+    SetEffect { mac: String, effect: llw_effects::EffectSpec },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -167,6 +168,38 @@ mod tests {
         let resp = ResponseEnvelope::err("nope");
         let s = serde_json::to_string(&resp).unwrap();
         assert!(s.contains(r#""ok":false"#) && s.contains("nope") && !s.contains("data"));
+    }
+
+    #[test]
+    fn set_effect_envelope_wire_shape() {
+        // Full envelope with an explicit effect object.
+        let line = r#"{"v":1,"method":"SetEffect","mac":"02:8b:51:62:32:e1","effect":{"kind":"ripple","colors":[[0,0,255]],"speed":3}}"#;
+        let env: RequestEnvelope = serde_json::from_str(line).unwrap();
+        assert_eq!(env.v, 1);
+        match env.req {
+            Request::SetEffect { mac, effect } => {
+                assert_eq!(mac, "02:8b:51:62:32:e1");
+                assert_eq!(effect.kind, llw_effects::EffectKind::Ripple);
+                assert_eq!(effect.colors, vec![[0u8, 0, 255]]);
+                assert_eq!(effect.speed, 3);
+                // defaults applied
+                assert_eq!(effect.brightness, 4);
+                assert_eq!(effect.direction, llw_effects::Direction::Forward);
+            }
+            _ => panic!("expected SetEffect"),
+        }
+
+        // Partial effect object — all fields omitted except kind; serde defaults fill the rest.
+        let partial = r#"{"v":1,"method":"SetEffect","mac":"02:8b:51:62:32:e1","effect":{"kind":"ripple"}}"#;
+        let env: RequestEnvelope = serde_json::from_str(partial).unwrap();
+        match env.req {
+            Request::SetEffect { effect, .. } => {
+                assert_eq!(effect.speed, 3, "partial effect must default speed to 3");
+                assert_eq!(effect.brightness, 4, "partial effect must default brightness to 4");
+                assert!(effect.colors.is_empty(), "partial effect must default colors to empty");
+            }
+            _ => panic!("expected SetEffect"),
+        }
     }
 
     #[test]

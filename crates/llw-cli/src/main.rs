@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use llw_protocol::dongle::Dongle;
 use llw_protocol::frames::{apply_pwm_constraints, pwm_frame};
 use llw_protocol::record::DeviceRecord;
+use llw_effects::{Direction, EffectKind, EffectSpec};
 
 #[derive(Parser)]
 #[command(name = "llw", about = "Lian Li wireless protocol proof tool")]
@@ -41,6 +42,27 @@ enum Command {
     },
     /// Show llw-daemon status
     Status,
+    /// List all available effect kinds with one-line descriptions
+    Effects,
+    /// Set an animated effect on a device via the daemon
+    SetEffect {
+        /// Device index (from `llw status`) or MAC address
+        index_or_mac: String,
+        /// Effect kind (e.g. ripple, rainbow, breathing, static, ...)
+        kind: String,
+        /// Palette colors as comma-separated hex values (e.g. 0000FF,8800FF)
+        #[arg(long)]
+        colors: Option<String>,
+        /// Animation speed 1-5 (default: 3)
+        #[arg(long, default_value_t = 3)]
+        speed: u8,
+        /// Animation direction: forward or reverse (default: forward)
+        #[arg(long, default_value = "forward")]
+        direction: String,
+        /// Brightness 0-4 (default: 4)
+        #[arg(long, default_value_t = 4)]
+        brightness: u8,
+    },
     /// Poll devices continuously, printing telemetry (Ctrl+C to stop)
     Watch {
         /// Poll interval in milliseconds
@@ -65,6 +87,10 @@ fn main() -> Result<()> {
         Command::SetPwm { index, percent, hold } => set_pwm(index, percent, hold),
         Command::SetColor { index, color } => set_color(index, &color),
         Command::Status => status(),
+        Command::Effects => effects(),
+        Command::SetEffect { index_or_mac, kind, colors, speed, direction, brightness } => {
+            set_effect_ipc(&index_or_mac, &kind, colors.as_deref(), speed, &direction, brightness)
+        }
         Command::Watch { interval_ms, pwm } => watch(interval_ms, pwm),
     }
 }
@@ -116,6 +142,133 @@ fn status() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Print all effect kinds with their one-line descriptions.
+/// Safe to run without a daemon — no IPC contact.
+fn effects() -> Result<()> {
+    println!("Available effects:");
+    for kind in EffectKind::all() {
+        let name = serde_json::to_string(kind)
+            .unwrap_or_default()
+            .trim_matches('"')
+            .to_string();
+        println!("  {:<16} {}", name, kind.describe());
+    }
+    Ok(())
+}
+
+/// Send a `SetEffect` request to the running daemon.
+/// `index_or_mac`: either a numeric device index (resolved to MAC via Status)
+/// or a raw MAC string (used directly).
+fn set_effect_ipc(
+    index_or_mac: &str,
+    kind_str: &str,
+    colors_str: Option<&str>,
+    speed: u8,
+    direction_str: &str,
+    brightness: u8,
+) -> Result<()> {
+    // Parse kind from kebab-case name via serde.
+    let kind: EffectKind = serde_json::from_str(&format!(r#""{kind_str}""#))
+        .with_context(|| {
+            let valid: Vec<String> = EffectKind::all()
+                .iter()
+                .map(|k| {
+                    serde_json::to_string(k)
+                        .unwrap_or_default()
+                        .trim_matches('"')
+                        .to_string()
+                })
+                .collect();
+            format!(
+                "unknown effect kind {:?}; valid kinds: {}",
+                kind_str,
+                valid.join(", ")
+            )
+        })?;
+
+    // Parse colors.
+    let colors: Vec<[u8; 3]> = match colors_str {
+        None => vec![],
+        Some(s) => s
+            .split(',')
+            .map(|c| parse_hex_color(c.trim()))
+            .collect::<Result<Vec<_>>>()?,
+    };
+
+    // Parse direction.
+    let direction = match direction_str.to_lowercase().as_str() {
+        "forward" => Direction::Forward,
+        "reverse" => Direction::Reverse,
+        other => bail!("direction must be 'forward' or 'reverse', got {:?}", other),
+    };
+
+    let spec = EffectSpec { kind, colors, speed, direction, brightness };
+
+    // Resolve index → MAC via a Status IPC call, or use the string directly.
+    let mac = resolve_mac_via_ipc(index_or_mac)?;
+
+    // Build and send the SetEffect request.
+    let req = serde_json::json!({
+        "v": 1,
+        "method": "SetEffect",
+        "mac": mac,
+        "effect": spec,
+    });
+
+    let resp = ipc_request(&req)?;
+    if !resp["ok"].as_bool().unwrap_or(false) {
+        bail!("daemon error: {}", resp["error"].as_str().unwrap_or("unknown"));
+    }
+    println!("Effect {:?} set on {}", kind_str, mac);
+    Ok(())
+}
+
+/// If `index_or_mac` parses as a `u8`, resolve it to a MAC via a Status call.
+/// Otherwise treat it as a MAC string directly.
+fn resolve_mac_via_ipc(index_or_mac: &str) -> Result<String> {
+    if let Ok(idx) = index_or_mac.parse::<u8>() {
+        // Numeric index: get Status and find the device at that position.
+        let status_req = serde_json::json!({"v": 1, "method": "Status"});
+        let resp = ipc_request(&status_req)?;
+        if !resp["ok"].as_bool().unwrap_or(false) {
+            bail!("daemon status error: {}", resp["error"].as_str().unwrap_or("unknown"));
+        }
+        let devices = resp["data"]["devices"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        // Status devices are returned in HashMap iteration order; the index here
+        // is the list position in the Status response (0-based), matching the
+        // index printed by `llw status`.
+        let dev = devices
+            .get(idx as usize)
+            .with_context(|| format!("no device at index {idx} — run `llw status`"))?;
+        Ok(dev["mac"]
+            .as_str()
+            .with_context(|| "device in status missing mac field")?
+            .to_string())
+    } else {
+        // Treat as a raw MAC address.
+        Ok(index_or_mac.to_string())
+    }
+}
+
+/// Send a JSON value over the IPC socket and return the parsed response.
+fn ipc_request(req: &serde_json::Value) -> Result<serde_json::Value> {
+    use std::io::{BufRead, BufReader, Write};
+    let path = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("llw-daemon.sock");
+    let mut stream = std::os::unix::net::UnixStream::connect(&path)
+        .with_context(|| format!("connecting {} — is llw-daemon running?", path.display()))?;
+    let line = serde_json::to_string(req)?;
+    writeln!(stream, "{line}")?;
+    let mut resp_line = String::new();
+    BufReader::new(stream.try_clone()?).read_line(&mut resp_line)?;
+    Ok(serde_json::from_str(&resp_line)?)
 }
 
 fn scan() -> Result<()> {

@@ -569,6 +569,32 @@ impl<T: UsbIo> Supervisor<T> {
                 }
                 ResponseEnvelope::ok(None)
             }
+            Request::SetEffect { mac, effect } => {
+                // Validate before touching anything (same rules as config.validate).
+                if let Err(e) = crate::config::validate_effect(&effect) {
+                    return ResponseEnvelope::err(format!("invalid effect: {e}"));
+                }
+                // Clone-mutate-save-swap: mutate a clone first so that a save
+                // failure leaves self.cfg untouched (no half-state).
+                let mut new_cfg = self.cfg.clone();
+                let Some(dc) = new_cfg.devices.iter_mut().find(|d| d.mac == mac) else {
+                    return ResponseEnvelope::err(format!("unknown device {mac}"));
+                };
+                dc.effect = Some(effect);
+                if let Err(e) = new_cfg.save(&crate::config::default_path()) {
+                    return ResponseEnvelope::err(format!("save failed: {e}"));
+                }
+                // Save succeeded — swap in the new config.
+                self.cfg = new_cfg;
+                // Force immediate re-assert on next rgb_tick.
+                if let Ok(m) = crate::config::parse_mac(&mac) {
+                    if let Some(dev) = self.devices.get_mut(&m) {
+                        dev.expected_fx = None;
+                        dev.last_rgb_upload = None;
+                    }
+                }
+                ResponseEnvelope::ok(None)
+            }
         }
     }
 
