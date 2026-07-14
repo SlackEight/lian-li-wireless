@@ -1723,3 +1723,22 @@ Expected: link acquired on the device-reported channel; fans at curve PWM within
 - **Spec coverage:** §3.3 supervisor/config/IPC → Tasks 5-9; §4.1 acquisition (redefined by experiment) → Task 3; §4.2 tiers → M2a machine + Task 6 integration; §4.3 wedge → Tasks 5/7; §4.4 telemetry → Task 8 Status; packaging → Task 10; M2 gate → Task 11. Deferred: OpenRGB server, effects (M3), bind/unbind (M4), multi-zone RGB.
 - **Types:** `Link` (T3) used by supervisor (T5) and StatusData (T2/T8); `IpcCmd` (T8) matches the `ipc_rx` param added to `Supervisor::new` (T8 modifies T5's constructor — tests updated in the same task); `Telemetry` from M2a is embedded in StatusData.
 - **Known judgment calls:** supervisor holds `Option<Dongle>` and drops it on ANY send/poll error (reconnect cadence 10s) — deliberately blunt for v1, matching "reopen is the recovery primitive"; `apply_config` has a flagged wart with a preferred refactor spelled out; RGB re-upload cooldown 5s prevents drift-storm loops on a device that refuses to hold state; simulation tests use second-granularity injected time (config takes seconds for reliability windows — tests set grace 0/cooldowns 0 to compress).
+
+---
+
+## Task 11 cutover — results (2026-07-14, morning)
+
+| Step | Result |
+|------|--------|
+| Config import | PASS — 1 curve + 1 device, ZERO warnings; k10temp mapped natively |
+| Install (binary/udev/unit) | PASS |
+| Daemon swap | PASS — llw-daemon acquired ch2 and took fan control; lianli-daemon + watchdog disabled |
+| Boot-scope hazard | FOUND+FIXED — lianli-linux's package enables its unit in GLOBAL systemd scope; user-scope disable was insufficient for cold boot. `systemctl --user mask lianli-daemon.service` applied (rollback: unmask) |
+| Live verification | PASS — desired==readback [86,86,86,0], ~730 RPM on curve, rgb_sync=true, 0 dropouts |
+| Restart recovery | PASS — connect 21ms, link 227ms, RGB asserted 580ms (journal, RUST_LOG=info now in unit) |
+| Cold-boot test | PENDING — owner reboots after this session; verify with `llw status` after login (link acquired, fans on curve, no intervention). This is the June failure scenario |
+| Soak | STARTED 2026-07-14 — 7 days, zero manual restarts required; `llw status` counters should stay sane. Gate closes ~2026-07-21 |
+
+Rollback at any point: `systemctl --user disable --now llw-daemon && systemctl --user unmask lianli-daemon && systemctl --user enable --now lianli-daemon lianli-watchdog`
+
+Repo published: https://github.com/SlackEight/lian-li-wireless (public, 2026-07-14)
