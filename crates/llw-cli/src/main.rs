@@ -73,6 +73,25 @@ enum Command {
         #[arg(long)]
         pwm: Option<u8>,
     },
+    /// Reveal physical LED wiring order by chasing a white block across fan 0's LEDs (diagnostic; requires llw-daemon stopped)
+    ProbeChase {
+        /// Device index from `llw devices`
+        index: u8,
+        /// Frame interval in milliseconds (how long each block stays lit)
+        #[arg(long, default_value_t = 400)]
+        ms: u16,
+        /// Number of consecutive LEDs lit per frame
+        #[arg(long, default_value_t = 1)]
+        block: u8,
+    },
+    /// Render a Rainbow at N frames, upload directly, then verify the firmware echoes the effect index (diagnostic; requires llw-daemon stopped)
+    ProbeFrames {
+        /// Device index from `llw devices`
+        index: u8,
+        /// Number of animation frames to render and upload
+        #[arg(long)]
+        frames: u16,
+    },
 }
 
 fn main() -> Result<()> {
@@ -92,6 +111,8 @@ fn main() -> Result<()> {
             set_effect_ipc(&index_or_mac, &kind, colors.as_deref(), speed, &direction, brightness)
         }
         Command::Watch { interval_ms, pwm } => watch(interval_ms, pwm),
+        Command::ProbeChase { index, ms, block } => probe_chase(index, ms, block),
+        Command::ProbeFrames { index, frames } => probe_frames(index, frames),
     }
 }
 
@@ -502,4 +523,186 @@ fn watch(interval_ms: u64, pwm: Option<u8>) -> Result<()> {
         }
         std::thread::sleep(std::time::Duration::from_millis(interval_ms));
     }
+}
+
+/// Chase a white block through fan 0's LEDs to reveal physical wiring order.
+///
+/// Frame `i` lights LEDs `[i*block, (i+1)*block)` bright white; all other
+/// LEDs on the device are black. The frame covers ALL device LEDs so the
+/// upload targets the correct geometry.
+///
+/// For fan devices we chase fan 0 only (indices 0..leds_per_fan).
+/// For flat-buffer devices (Strimer, Lc217, etc.) we chase up to 64 LEDs
+/// from the start of the strip.
+///
+/// Run with llw-daemon stopped: `systemctl --user stop llw-daemon`.
+fn probe_chase(index: u8, ms: u16, block: u8) -> Result<()> {
+    if block == 0 {
+        bail!("--block must be ≥ 1");
+    }
+    let mut dongle = open_dongle()?;
+    let master = dongle.discover_master().context("discovering master")?;
+    println!("Master {} on channel {}", mac_str(&master.mac), master.channel);
+
+    let device = find_device(&mut dongle, index)?;
+    let total = device.total_leds();
+    if total == 0 {
+        bail!("device reports 0 LEDs — unsupported kind?");
+    }
+
+    // Determine how many LEDs to chase (fan 0 for fan devices, up to 64 for strips).
+    let leds_per_fan = device.kind.leds_per_fan();
+    let (chase_count, target): (u16, &str) = if device.kind.led_count_override().is_some() {
+        // Flat-buffer device: chase up to 64 LEDs
+        (total.min(64), "the strip")
+    } else if leds_per_fan > 0 {
+        // Fan device: chase fan 0's LEDs only
+        (leds_per_fan as u16, "fan 0")
+    } else {
+        bail!("cannot determine LED count per fan for this device kind");
+    };
+
+    let block = block as u16;
+    let frame_count = chase_count.div_ceil(block);
+    let loop_secs = frame_count as f32 * ms as f32 / 1000.0;
+
+    println!(
+        "chasing {chase_count} LEDs of {target} at {ms}ms — full loop {loop_secs:.1}s ({frame_count} frames, {block} LED(s)/frame)",
+    );
+
+    // Build one frame per block position. Each frame is total LEDs wide.
+    let frames: Vec<Vec<[u8; 3]>> = (0..frame_count)
+        .map(|i| {
+            let start = (i * block) as usize;
+            let end = ((i * block + block) as usize).min(total as usize);
+            (0..total as usize)
+                .map(|led| {
+                    if led >= start && led < end {
+                        [255u8, 255, 255]
+                    } else {
+                        [0u8, 0, 0]
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
+    let fx = dongle.upload_rgb(
+        &device.mac,
+        &master.mac,
+        device.channel,
+        device.rx_type,
+        &frames,
+        ms,
+        4,
+    )?;
+    println!(
+        "uploaded {} frames → {} ({}, {} LEDs total), effect index {:02x?}",
+        frames.len(),
+        mac_str(&device.mac),
+        device.kind.display_name(),
+        total,
+        fx,
+    );
+    Ok(())
+}
+
+/// Render a Rainbow animation at N frames and verify the firmware echoes the effect index.
+///
+/// Builds the device geometry directly from the device record (same logic as
+/// `effects_bridge::geometry_of` in llw-daemon — duplicated here to keep this a
+/// direct-dongle path with no daemon dependency), renders via `llw_effects::render_animation`,
+/// uploads with `upload_rgb`, waits 3s, calls GetDev, and checks that the reported
+/// `effect_index` matches the upload return value.
+///
+/// Run with llw-daemon stopped: `systemctl --user stop llw-daemon`.
+fn probe_frames(index: u8, frames: u16) -> Result<()> {
+    use llw_effects::{render_animation, Geometry};
+
+    if frames == 0 {
+        bail!("--frames must be ≥ 1");
+    }
+
+    let mut dongle = open_dongle()?;
+    let master = dongle.discover_master().context("discovering master")?;
+    println!("Master {} on channel {}", mac_str(&master.mac), master.channel);
+
+    let device = find_device(&mut dongle, index)?;
+
+    // Build geometry from the device record.
+    // This mirrors effects_bridge::geometry_of — duplicated here so probe-frames
+    // works as a direct-dongle path with no daemon crate dependency.
+    let geom = if device.kind.is_aio() {
+        bail!("AIO devices are not supported by probe-frames (post-v1 geometry)");
+    } else if let Some(total) = device.kind.led_count_override() {
+        Geometry::Strip { total }
+    } else {
+        let lpf = device.kind.leds_per_fan();
+        if lpf == 0 || device.fan_count == 0 {
+            bail!(
+                "cannot build geometry for {} (leds_per_fan={lpf}, fan_count={})",
+                device.kind.display_name(),
+                device.fan_count,
+            );
+        }
+        Geometry::Fans { fan_count: device.fan_count, leds_per_fan: lpf }
+    };
+
+    let spec = EffectSpec {
+        kind: EffectKind::Rainbow,
+        colors: vec![],
+        speed: 3,
+        direction: Direction::Forward,
+        brightness: 4,
+    };
+
+    let (rendered_frames, interval_ms) = render_animation(&spec, &geom, frames);
+
+    let raw_bytes: usize = rendered_frames.iter().map(|f| f.len() * 3).sum();
+    println!(
+        "rendering Rainbow: {frames} frames × {} LEDs = {raw_bytes} raw bytes, interval {interval_ms}ms",
+        geom.len(),
+    );
+
+    let upload_fx = dongle.upload_rgb(
+        &device.mac,
+        &master.mac,
+        device.channel,
+        device.rx_type,
+        &rendered_frames,
+        interval_ms,
+        4,
+    )?;
+    println!(
+        "uploaded → {} ({}), effect index {:02x?}",
+        mac_str(&device.mac),
+        device.kind.display_name(),
+        upload_fx,
+    );
+
+    // Wait 3s of silence then verify the firmware echoes the effect index.
+    println!("waiting 3s for firmware to settle...");
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    let verify_report = poll_devices(&mut dongle)?;
+    let dev_after = verify_report
+        .devices
+        .iter()
+        .find(|d| d.mac == device.mac)
+        .with_context(|| "device disappeared from GetDev after upload")?;
+
+    if dev_after.effect_index == upload_fx {
+        println!(
+            "PASS — effect_index {:02x?} matches upload return value {:02x?}",
+            dev_after.effect_index, upload_fx,
+        );
+    } else {
+        println!(
+            "FAIL — effect_index {:02x?} does not match upload return value {:02x?}",
+            dev_after.effect_index, upload_fx,
+        );
+    }
+    println!("fx values: {:02x?}", dev_after.effect_index);
+
+    Ok(())
 }
