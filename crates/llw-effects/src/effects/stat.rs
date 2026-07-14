@@ -26,7 +26,7 @@ mod tests {
     #[test]
     fn static_default_white() {
         let spec = spec_with_colors(vec![]);
-        let geom = Geometry::Fans { fan_count: 3, leds_per_fan: 44 };
+        let geom = Geometry::Fans { fan_count: 3, leds_per_fan: 44, layout: crate::geometry::FanLayout::UniformRing };
         let frame = render(&spec, &geom, 0.0);
         assert_eq!(frame.len(), 132);
         assert!(frame.iter().all(|&c| c == [255, 255, 255]));
@@ -45,7 +45,7 @@ mod tests {
     #[test]
     fn static_is_time_invariant() {
         let spec = spec_with_colors(vec![[255, 0, 0]]);
-        let geom = Geometry::Fans { fan_count: 1, leds_per_fan: 8 };
+        let geom = Geometry::Fans { fan_count: 1, leds_per_fan: 8, layout: crate::geometry::FanLayout::UniformRing };
         let f0 = render(&spec, &geom, 0.0);
         let f1 = render(&spec, &geom, 0.99);
         assert_eq!(f0, f1);

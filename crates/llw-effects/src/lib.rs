@@ -241,7 +241,7 @@ mod tests {
     fn brightness_zero_all_black() {
         let mut spec = base_spec(EffectKind::Static);
         spec.brightness = 0;
-        let geom = Geometry::Fans { fan_count: 3, leds_per_fan: 44 };
+        let geom = Geometry::Fans { fan_count: 3, leds_per_fan: 44, layout: geometry::FanLayout::UniformRing };
         let frame = render_frame(&spec, &geom, 0.0);
         assert!(
             frame.iter().all(|&c| c == [0, 0, 0]),
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn render_frame_deterministic() {
         let spec = base_spec(EffectKind::Static);
-        let geom = Geometry::Fans { fan_count: 3, leds_per_fan: 44 };
+        let geom = Geometry::Fans { fan_count: 3, leds_per_fan: 44, layout: geometry::FanLayout::UniformRing };
         let a = render_frame(&spec, &geom, 0.42);
         let b = render_frame(&spec, &geom, 0.42);
         assert_eq!(a, b, "render_frame must be deterministic");
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn static_animation_all_white() {
         let spec = base_spec(EffectKind::Static);
-        let geom = Geometry::Fans { fan_count: 3, leds_per_fan: 44 };
+        let geom = Geometry::Fans { fan_count: 3, leds_per_fan: 44, layout: geometry::FanLayout::UniformRing };
         let (frames, _) = render_animation(&spec, &geom, 4);
         for frame in &frames {
             assert!(frame.iter().all(|&c| c == [255, 255, 255]));

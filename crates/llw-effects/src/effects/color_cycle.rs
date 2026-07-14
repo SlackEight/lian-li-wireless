@@ -40,7 +40,7 @@ mod tests {
         }
     }
 
-    fn fans() -> Geometry { Geometry::Fans { fan_count: 3, leds_per_fan: 44 } }
+    fn fans() -> Geometry { Geometry::Fans { fan_count: 3, leds_per_fan: 44, layout: crate::geometry::FanLayout::UniformRing } }
     fn strip() -> Geometry { Geometry::Strip { total: 132 } }
 
     // ---- uniformity ----

@@ -34,7 +34,7 @@ pub fn render(spec: &EffectSpec, geom: &Geometry, t: f32) -> Vec<[u8; 3]> {
     let off_color = if spec.colors.len() >= 2  { spec.colors[1]   } else { [0u8, 0, 0]   };
 
     match geom {
-        Geometry::Fans { fan_count, leds_per_fan } => {
+        Geometry::Fans { fan_count, leds_per_fan, .. } => {
             let fc = *fan_count;
             let lf = *leds_per_fan;
             let mut frame = Vec::with_capacity(fc as usize * lf as usize);
@@ -80,7 +80,7 @@ mod tests {
     }
 
     fn strip() -> Geometry { Geometry::Strip { total: 132 } }
-    fn fans() -> Geometry { Geometry::Fans { fan_count: 3, leds_per_fan: 44 } }
+    fn fans() -> Geometry { Geometry::Fans { fan_count: 3, leds_per_fan: 44, layout: crate::geometry::FanLayout::UniformRing } }
 
     // ---- duty cycle ≈ 50% ----
     //

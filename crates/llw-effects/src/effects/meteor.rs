@@ -42,7 +42,7 @@ use crate::geometry::{self, Geometry};
 /// Color at each LED = `scale(palette(pos), brightness_factor)`.
 pub fn render(spec: &EffectSpec, geom: &Geometry, t: f32) -> Vec<[u8; 3]> {
     match geom {
-        Geometry::Fans { fan_count, leds_per_fan } => {
+        Geometry::Fans { fan_count, leds_per_fan, .. } => {
             let fc = *fan_count;
             let lf = *leds_per_fan;
             let mut frame = Vec::with_capacity(fc as usize * lf as usize);
@@ -91,7 +91,7 @@ mod tests {
         }
     }
 
-    fn fans() -> Geometry { Geometry::Fans { fan_count: 3, leds_per_fan: 44 } }
+    fn fans() -> Geometry { Geometry::Fans { fan_count: 3, leds_per_fan: 44, layout: crate::geometry::FanLayout::UniformRing } }
     fn strip() -> Geometry { Geometry::Strip { total: 132 } }
 
     fn brightness_sum(c: [u8; 3]) -> u32 {
@@ -188,8 +188,7 @@ mod tests {
         let frame = render(&spec(), &strip(), 0.0);
         // LEDs 10..85 are far ahead of the head (d ∈ [0.35, 0.92]): must be nearly black
         // (each channel ≤ 4, matching exp(-0.35*12)*255 = exp(-4.2)*255 ≈ 3.8 boundary)
-        for i in 10..86usize {
-            let c = frame[i];
+        for (i, &c) in frame.iter().enumerate().take(86).skip(10) {
             assert!(
                 c[0] <= 4 && c[1] <= 4 && c[2] <= 4,
                 "LED {i} (d>0.35) should be effectively black, got {:?}", c

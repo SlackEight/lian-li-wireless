@@ -54,7 +54,7 @@
 //! false); direction has no visual meaning for a radial pulse.
 
 use crate::{color, EffectSpec};
-use crate::geometry::{self, Geometry};
+use crate::geometry::{self, FanLayout, Geometry};
 
 /// Half-width of the Gaussian envelope in normalised distance units.
 const SIGMA: f32 = 0.06;
@@ -71,15 +71,28 @@ pub fn render(spec: &EffectSpec, geom: &Geometry, t: f32) -> Vec<[u8; 3]> {
     let base_color = color::palette(&spec.colors, t);
 
     match geom {
-        Geometry::Fans { fan_count, leds_per_fan } => {
+        Geometry::Fans { fan_count, leds_per_fan, layout } => {
             let fc = *fan_count;
             let lf = *leds_per_fan;
+            let layout = *layout;
             let mut frame = Vec::with_capacity(fc as usize * lf as usize);
             for _fan in 0..fc {
-                // dist depends only on ring angle (i), not on which fan → all fans identical
                 for i in 0..lf {
-                    let a = geometry::ring_angle(i, lf);
-                    let dist = a.min(1.0 - a); // shortest angular distance to angle 0
+                    let dist = match layout {
+                        FanLayout::UniformRing => {
+                            // Angular distance: wavefront expands around the ring.
+                            // dist depends only on ring angle (i), not on which fan → all fans identical.
+                            let a = geometry::ring_angle(i, lf);
+                            a.min(1.0 - a) // shortest angular distance to angle 0
+                        }
+                        FanLayout::SlInf44 => {
+                            // Radial distance: wavefront expands outward from centre.
+                            // Physical radius (raw): inner 0.4, arcs 1.0, strips 1.15.
+                            // Normalise by 1.15 → inner ≈ 0.348, arcs ≈ 0.870, strips 1.0.
+                            let (_, radius) = geometry::led_polar(layout, i, lf);
+                            radius / 1.15
+                        }
+                    };
                     let brightness = (-(dist - r).powi(2) / TWO_SIGMA_SQ).exp() * fade;
                     frame.push(color::scale(base_color, brightness));
                 }
@@ -119,7 +132,7 @@ mod tests {
         }
     }
 
-    fn fans() -> Geometry { Geometry::Fans { fan_count: 3, leds_per_fan: 44 } }
+    fn fans() -> Geometry { Geometry::Fans { fan_count: 3, leds_per_fan: 44, layout: crate::geometry::FanLayout::UniformRing } }
     fn strip() -> Geometry { Geometry::Strip { total: 132 } }
 
     fn max_channel(frame: &[[u8; 3]]) -> u8 {
@@ -167,7 +180,7 @@ mod tests {
             let a = i as f32 / lf as f32;
             let dist = a.min(1.0 - a);
             let idx = i as usize; // fan 0 suffices (all fans identical)
-            if frame[idx].iter().any(|&v| v == peak) {
+            if frame[idx].contains(&peak) {
                 assert!(
                     (dist - r).abs() < led_spacing,
                     "brightest fan LED (i={i}, dist={dist:.5}) is more than one \
@@ -195,7 +208,7 @@ mod tests {
         for i in 0..total {
             let pos = i as f32 / total as f32;
             let dist = (pos - 0.5).abs() * 2.0;
-            if frame[i as usize].iter().any(|&v| v == peak) {
+            if frame[i as usize].contains(&peak) {
                 assert!(
                     (dist - r).abs() < dist_spacing,
                     "brightest strip LED (i={i}, dist={dist:.5}) is more than one \
@@ -349,20 +362,112 @@ mod tests {
         // dist = |pos−0.5|·2 > 0.25 → pos < 0.375 or pos > 0.625
         // → i < 49.5 → LEDs 0..49; i > 82.5 → LEDs 83..131.
         // Test representative ranges: LEDs 0..49 and 83..131.
-        for i in 0..50usize {
-            let c = frame[i];
+        for (i, &c) in frame.iter().enumerate().take(50) {
             assert!(
                 c == [0, 0, 0],
                 "strip LED {i} (outer, dist>0.25, t=0) must be black, got {c:?}"
             );
         }
-        for i in 83..total {
-            let c = frame[i];
+        for (i, &c) in frame.iter().enumerate().skip(83) {
             assert!(
                 c == [0, 0, 0],
                 "strip LED {i} (outer, dist>0.25, t=0) must be black, got {c:?}"
             );
         }
+    }
+
+    // =========================================================================
+    // Ripple on SlInf44 — tests added in commit 2 (2026-07-14)
+    // =========================================================================
+    //
+    // SlInf44 radial ripple: dist = physical_radius / 1.15 (normalised to 0..=1).
+    //   inner ring: radius 0.4 → dist ≈ 0.348
+    //   arcs:       radius 1.0 → dist ≈ 0.870
+    //   strips:     radius 1.15 → dist = 1.0
+    //
+    // Wavefront r = t; brightness = exp(−(dist − r)² / TWO_SIGMA_SQ) × (1 − t).
+    // σ = 0.06, TWO_SIGMA_SQ = 0.0072.
+
+    fn sl_inf44_fans_ripple() -> Geometry {
+        Geometry::Fans {
+            fan_count: 1,
+            leds_per_fan: 44,
+            layout: crate::geometry::FanLayout::SlInf44,
+        }
+    }
+
+    fn max_channel_slice(frame: &[[u8; 3]], range: std::ops::Range<usize>) -> u8 {
+        frame[range].iter().flat_map(|c| c.iter().copied()).max().unwrap_or(0)
+    }
+
+    // ---- at t=0.35: inner ring (dist≈0.348) is near the wavefront and bright;
+    //      arcs (dist≈0.870) are effectively black ----
+    //
+    // inner ring: dist ≈ 0.4/1.15 = 0.34783, r = 0.35
+    //   (dist−r)² = (−0.00217)² ≈ 4.71e-6 → exp(−4.71e-6/0.0072) ≈ 0.9993
+    //   fade = 0.65 → brightness ≈ 0.6495 → channel ≈ 166
+    //
+    // arcs: dist ≈ 1.0/1.15 = 0.8696, r = 0.35
+    //   (dist−r)² ≈ 0.2700 → exp(−37.5) ≈ 0 → channel 0
+
+    #[test]
+    fn t035_slinf44_inner_bright_arcs_black() {
+        let frame = render(&spec(), &sl_inf44_fans_ripple(), 0.35);
+
+        // Inner ring: indices 0-7. All should be bright.
+        let inner_peak = max_channel_slice(&frame, 0..8);
+        assert!(
+            inner_peak > 100,
+            "inner ring at t=0.35 (dist≈0.348≈r) must be bright, got peak={inner_peak}"
+        );
+
+        // Left arcs: indices 8-17. Should be near-black (dist 0.870, far from r=0.35).
+        let arc_peak = max_channel_slice(&frame, 8..18);
+        assert!(
+            arc_peak <= 4,
+            "left arc at t=0.35 (dist≈0.870) must be near-black, got peak={arc_peak}"
+        );
+
+        // Right arcs: indices 26-35. Same reasoning.
+        let rarc_peak = max_channel_slice(&frame, 26..36);
+        assert!(
+            rarc_peak <= 4,
+            "right arc at t=0.35 must be near-black, got peak={rarc_peak}"
+        );
+    }
+
+    // ---- at t=0.95: inner ring is black; side strips carry the faded front ----
+    //
+    // inner ring: dist ≈ 0.348, r = 0.95
+    //   (dist−r)² = (−0.602)² = 0.362 → exp(−50.3) ≈ 0 → channel 0
+    //
+    // strips: dist = 1.0, r = 0.95
+    //   (dist−r)² = 0.05² = 0.0025 → exp(−0.347) ≈ 0.707
+    //   fade = 0.05 → brightness ≈ 0.0354 → channel ≈ 9
+
+    #[test]
+    fn t095_slinf44_inner_black_strips_carry_front() {
+        let frame = render(&spec(), &sl_inf44_fans_ripple(), 0.95);
+
+        // Inner ring must be black.
+        let inner_peak = max_channel_slice(&frame, 0..8);
+        assert!(
+            inner_peak <= 4,
+            "inner ring at t=0.95 must be near-black (wavefront far past inner), got {inner_peak}"
+        );
+
+        // Side strips (indices 18-25 and 36-43) carry the faded front.
+        // Expected channel ≈ 9 — must be > 4 (nonzero at the wave).
+        let lstrip_peak = max_channel_slice(&frame, 18..26);
+        let rstrip_peak = max_channel_slice(&frame, 36..44);
+        assert!(
+            lstrip_peak > 4,
+            "left strip at t=0.95 (dist=1.0, near wavefront) must be nonzero, got {lstrip_peak}"
+        );
+        assert!(
+            rstrip_peak > 4,
+            "right strip at t=0.95 must be nonzero, got {rstrip_peak}"
+        );
     }
 
     // ---- fans in-phase: all fan slices are identical at any t ----

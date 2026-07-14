@@ -632,6 +632,7 @@ fn probe_frames(index: u8, frames: u16) -> Result<()> {
     // Build geometry from the device record.
     // This mirrors effects_bridge::geometry_of — duplicated here so probe-frames
     // works as a direct-dongle path with no daemon crate dependency.
+    // probe-frames is a diagnostic tool; UniformRing is adequate for frame-count probing.
     let geom = if device.kind.is_aio() {
         bail!("AIO devices are not supported by probe-frames (post-v1 geometry)");
     } else if let Some(total) = device.kind.led_count_override() {
@@ -645,7 +646,8 @@ fn probe_frames(index: u8, frames: u16) -> Result<()> {
                 device.fan_count,
             );
         }
-        Geometry::Fans { fan_count: device.fan_count, leds_per_fan: lpf }
+        use llw_effects::geometry::FanLayout;
+        Geometry::Fans { fan_count: device.fan_count, leds_per_fan: lpf, layout: FanLayout::UniformRing }
     };
 
     let spec = EffectSpec {

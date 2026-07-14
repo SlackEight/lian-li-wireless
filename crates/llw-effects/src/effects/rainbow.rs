@@ -43,13 +43,13 @@ use crate::geometry::{self, Geometry};
 /// No palette is used — full saturation and value always.
 pub fn render_rainbow(_spec: &EffectSpec, geom: &Geometry, t: f32) -> Vec<[u8; 3]> {
     match geom {
-        Geometry::Fans { fan_count, leds_per_fan } => {
+        Geometry::Fans { fan_count, leds_per_fan, layout } => {
             let fc = *fan_count;
             let lf = *leds_per_fan;
             let mut frame = Vec::with_capacity(fc as usize * lf as usize);
             for _fan in 0..fc {
                 for i in 0..lf {
-                    let axis = geometry::ring_angle(i, lf);
+                    let axis = geometry::led_polar(*layout, i, lf).0;
                     let hue = (axis + t).rem_euclid(1.0);
                     frame.push(color::hsv_to_rgb(hue, 1.0, 1.0));
                 }
@@ -107,7 +107,7 @@ mod tests {
         }
     }
 
-    fn fans() -> Geometry { Geometry::Fans { fan_count: 3, leds_per_fan: 44 } }
+    fn fans() -> Geometry { Geometry::Fans { fan_count: 3, leds_per_fan: 44, layout: crate::geometry::FanLayout::UniformRing } }
     fn strip() -> Geometry { Geometry::Strip { total: 132 } }
 
     // =========================================================================
@@ -298,6 +298,91 @@ mod tests {
                 "LED 0 of fan 0 and fan 2 must match at t={t}"
             );
         }
+    }
+
+    // =========================================================================
+    // Rainbow on SlInf44 — tests added in commit 2 (2026-07-14)
+    // =========================================================================
+
+    fn sl_inf44_fans() -> Geometry {
+        Geometry::Fans {
+            fan_count: 1,
+            leds_per_fan: 44,
+            layout: crate::geometry::FanLayout::SlInf44,
+        }
+    }
+
+    // ---- left-arc / right-arc at same height are reflections ----
+    //
+    // idx 12 (outer LEFT arc, k=4):  angle = 0.5 + 4.5×0.05 = 0.725
+    // idx 30 (outer RIGHT arc, k=4): angle = (0.5 − 4.5×0.05).rem_euclid(1) = 0.275
+    //
+    // These are left-right reflections: 0.725 + 0.275 = 1.0.
+    // The uniform-ring assumption produced the SAME angle for both (all at radius 1.0
+    // with ring_angle), causing the rainbow to mirror on the left arc.
+    // With SlInf44, each LED gets its measured angle, and the rainbow is correct.
+    //
+    // At t=0:
+    //   hue(idx 12) = (0.725 + 0.0).rem_euclid(1.0) = 0.725
+    //   hue(idx 30) = (0.275 + 0.0).rem_euclid(1.0) = 0.275
+    //
+    // hsv_to_rgb(0.725):
+    //   h_scaled = 0.725*6 = 4.35; i=4, f=0.35
+    //   sextant 4: (p,q,v)=(0,v,q)=(0,1,0.65) wait — sextant 4 is (t_local,p,v):
+    //   sextant 4: R=f, G=0, B=1 → R=(0.35*255).round()=89, G=0, B=255 → [89,0,255]
+    //   Actually: sextant 4 formula: (t_local, p, v) → (f, 0, 1)
+    //   R = f*255 = 0.35*255 = 89.25 → round → 89; G = 0; B = 255
+    //
+    // hsv_to_rgb(0.275):
+    //   h_scaled = 0.275*6 = 1.65; i=1, f=0.65
+    //   sextant 1: (q,v,p)=(1-0.65, 1, 0) → (0.35, 1, 0)
+    //   R=0.35*255=89.25→89; G=255; B=0 → [89,255,0]
+
+    #[test]
+    fn rainbow_slinf44_left_right_arc_same_height_are_reflections() {
+        let geom = sl_inf44_fans();
+        let s = spec_rainbow();
+        let frame = render_rainbow(&s, &geom, 0.0);
+
+        // idx 12 (left arc k=4): angle=0.725
+        // idx 30 (right arc k=4): angle=0.275
+        // Verify angles are correct reflections (sum to 1.0) by checking colors:
+        // hue 0.725 → [89, 0, 255]; hue 0.275 → [89, 255, 0]
+        let left_led  = frame[12]; // left arc k=4, angle 0.725
+        let right_led = frame[30]; // right arc k=4, angle 0.275 (mirror)
+
+        // Both should have R≈89 (same hue distance from a primary).
+        assert_eq!(left_led[0], right_led[0],
+            "left-arc and right-arc LEDs at same height must have matching R channel \
+             (angles are reflections: left 0.725, right 0.275)");
+
+        // Left: high B, low G. Right: high G, low B (reflections in hue wheel).
+        assert!(left_led[2] > left_led[1],
+            "left arc LED (hue≈0.725) must have B > G, got {left_led:?}");
+        assert!(right_led[1] > right_led[2],
+            "right arc LED (hue≈0.275) must have G > B, got {right_led:?}");
+
+        // Golden-pin: verify exact computed colors.
+        assert_eq!(left_led,  [89, 0, 255], "idx 12 (left arc k=4, hue=0.725) must be [89,0,255]");
+        assert_eq!(right_led, [89, 255, 0], "idx 30 (right arc k=4, hue=0.275) must be [89,255,0]");
+    }
+
+    // ---- inner ring LEDs at t=0 all have angle in [0.75, 0.625∪... ) ----
+    //
+    // Inner ring (idx 0-7): angles go from 0.75 to 0.625 (wrapping through 1.0→0.0→...).
+    // All have radius 0.4 (unused by rainbow, only angle matters).
+    // Check that consecutive inner-ring LEDs have different hues (they span the wheel).
+
+    #[test]
+    fn rainbow_slinf44_inner_ring_has_varied_hues() {
+        let geom = sl_inf44_fans();
+        let s = spec_rainbow();
+        let frame = render_rainbow(&s, &geom, 0.0);
+        // inner ring: indices 0..8. Angles span 0.75 to 0.625 (wrapping through 1.0/0.0).
+        // Not all the same → first and last must differ.
+        let first = frame[0]; // angle 0.75
+        let last  = frame[7]; // angle 0.625
+        assert_ne!(first, last, "inner ring first and last LED must have different colors");
     }
 
     // ---- direction: Reverse frame(t) for Strip equals Forward frame(1-t) ----
