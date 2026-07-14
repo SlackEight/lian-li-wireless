@@ -188,4 +188,4 @@ The M1-deferred experiment: find the firmware's animation storage ceiling per fa
 
 **Task 8 (flash probe, Rainbow @ 132 LEDs):** 32/64/96 frames PASS; 112/128 FAIL (firmware wipes fx to all-zero — fails safe, drift-detectable). Ceiling ≈ 38-44KB RAW (likely 40KB); protocol max (55.8KB compressed) is NOT the binding limit. Budget decision: byte-based — RAW_BYTE_BUDGET = 28,000 (≈75% of measured floor), frames = min(96, budget/(leds×3)), floor 8. → 132 LEDs: 70 frames; 174-LED Strimer: 53 frames.
 
-**Bonus observation:** master hopped ch8 → ch2 spontaneously between the morning boot and this session — first direct evidence for the settles-away-from-congestion hypothesis (soak note).
+**Bonus observation (CORRECTED):** during the probe session, `discover_master` (GET_MAC first-hit) reported channel 2 while GetDev device records — the ground truth — stayed on channel 8 throughout. No hop occurred: this is further evidence that GET_MAC responses carry no operating-channel information, reinforcing the GetDev-only acquisition design.
