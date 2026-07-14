@@ -20,7 +20,7 @@ pub enum FanLayout {
     ///
     /// | idx   | segment          | count | angle formula                                            | radius |
     /// |-------|------------------|-------|----------------------------------------------------------|--------|
-    /// | 0-7   | inner ring       | 8     | `(0.75 + k/8) mod 1` (clockwise from left-middle)       | 0.4    |
+    /// | 0-7   | inner ring       | 8     | `(0.75 + k/8) mod 1` (clockwise from left-middle)       | 0.7    |
     /// | 8-17  | outer LEFT arc   | 10    | `(0.5 + (k+0.5)×0.05) mod 1` (bottom→top)               | 1.0    |
     /// | 18-25 | LEFT side strip  | 8     | `(0.5 + (k+0.5)×0.0625) mod 1` (bottom→top)             | 1.15   |
     /// | 26-35 | outer RIGHT arc  | 10    | `(0.5 − (k+0.5)×0.05).rem_euclid(1)` (bottom→top)      | 1.0    |
@@ -122,7 +122,7 @@ pub fn strip_pos(i: u16, total: u16) -> f32 {
 ///
 /// - `angle` ∈ [0, 1): fractional turns, 0 = top, clockwise.
 /// - `radius`: relative radius. `UniformRing` → always 1.0. `SlInf44` →
-///   inner ring 0.4, arcs 1.0, side strips 1.15. Normalise by 1.15 for
+///   inner ring 0.7, arcs 1.0, side strips 1.15. Normalise by 1.15 for
 ///   effects that want a 0..=1 radial distance.
 ///
 /// For `SlInf44`, `leds_per_fan` must be 44 in debug builds; in release builds
@@ -146,11 +146,15 @@ pub fn led_polar(layout: FanLayout, i: u8, leds_per_fan: u8) -> (f32, f32) {
 
 /// Compute the polar coordinates for LED `i` within an SL-INF 44-LED fan.
 ///
+/// Radius values are VISUAL-TIMING values tuned on hardware 2026-07-14
+/// (inner 0.7 ≈ wave reaches outer ring ~0.8 s after inner flash at speed 3),
+/// not physical measurements.
+///
 /// Segments and their formulae (k = index within segment):
 ///
 /// | idx   | segment          | angle formula                              | radius |
 /// |-------|------------------|--------------------------------------------|--------|
-/// | 0-7   | inner ring       | `(0.75 + k/8.0) mod 1`                    | 0.4    |
+/// | 0-7   | inner ring       | `(0.75 + k/8.0) mod 1`                    | 0.7    |
 /// | 8-17  | outer LEFT arc   | `(0.5 + (k+0.5)×0.05) mod 1`             | 1.0    |
 /// | 18-25 | LEFT side strip  | `(0.5 + (k+0.5)×0.0625) mod 1`           | 1.15   |
 /// | 26-35 | outer RIGHT arc  | `(0.5 − (k+0.5)×0.05).rem_euclid(1)`    | 1.0    |
@@ -162,7 +166,7 @@ fn sl_inf44_polar(i: u8) -> (f32, f32) {
         0..=7 => {
             let k = i as f32;
             let angle = (0.75 + k / 8.0).rem_euclid(1.0);
-            (angle, 0.4)
+            (angle, 0.7)
         }
         // 8-17: outer LEFT arc — 10 LEDs, bottom→top
         8..=17 => {
@@ -275,18 +279,18 @@ mod tests {
 
     #[test]
     fn sl_inf44_idx0_inner_ring_start() {
-        // idx 0: inner ring, k=0. angle = (0.75 + 0/8).rem_euclid(1) = 0.75. radius = 0.4.
+        // idx 0: inner ring, k=0. angle = (0.75 + 0/8).rem_euclid(1) = 0.75. radius = 0.7.
         let (angle, radius) = led_polar(FanLayout::SlInf44, 0, 44);
         assert!((angle - 0.75).abs() < 1e-5, "idx 0 angle must be 0.75, got {angle}");
-        assert!((radius - 0.4).abs() < 1e-5, "idx 0 radius must be 0.4, got {radius}");
+        assert!((radius - 0.7).abs() < 1e-5, "idx 0 radius must be 0.7, got {radius}");
     }
 
     #[test]
     fn sl_inf44_idx7_inner_ring_end() {
-        // idx 7: inner ring, k=7. angle = (0.75 + 7/8.0).rem_euclid(1) = (0.75+0.875) mod 1 = 0.625. radius = 0.4.
+        // idx 7: inner ring, k=7. angle = (0.75 + 7/8.0).rem_euclid(1) = (0.75+0.875) mod 1 = 0.625. radius = 0.7.
         let (angle, radius) = led_polar(FanLayout::SlInf44, 7, 44);
         assert!((angle - 0.625).abs() < 1e-5, "idx 7 angle must be 0.625, got {angle}");
-        assert!((radius - 0.4).abs() < 1e-5, "idx 7 radius must be 0.4, got {radius}");
+        assert!((radius - 0.7).abs() < 1e-5, "idx 7 radius must be 0.7, got {radius}");
     }
 
     #[test]
@@ -323,11 +327,11 @@ mod tests {
 
     #[test]
     fn sl_inf44_segment_radii() {
-        // Verify segment radii: inner=0.4, arcs=1.0, strips=1.15.
+        // Verify segment radii (visual-timing values tuned 2026-07-14): inner=0.7, arcs=1.0, strips=1.15.
         let (_, r_inner) = led_polar(FanLayout::SlInf44, 0, 44);   // inner ring
         let (_, r_arc)   = led_polar(FanLayout::SlInf44, 8, 44);   // left arc
         let (_, r_strip) = led_polar(FanLayout::SlInf44, 18, 44);  // left strip
-        assert!((r_inner - 0.4 ).abs() < 1e-5, "inner ring radius must be 0.4");
+        assert!((r_inner - 0.7 ).abs() < 1e-5, "inner ring radius must be 0.7");
         assert!((r_arc   - 1.0 ).abs() < 1e-5, "arc radius must be 1.0");
         assert!((r_strip - 1.15).abs() < 1e-5, "strip radius must be 1.15");
     }

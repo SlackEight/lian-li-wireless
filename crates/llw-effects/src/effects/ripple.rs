@@ -87,8 +87,8 @@ pub fn render(spec: &EffectSpec, geom: &Geometry, t: f32) -> Vec<[u8; 3]> {
                         }
                         FanLayout::SlInf44 => {
                             // Radial distance: wavefront expands outward from centre.
-                            // Physical radius (raw): inner 0.4, arcs 1.0, strips 1.15.
-                            // Normalise by 1.15 → inner ≈ 0.348, arcs ≈ 0.870, strips 1.0.
+                            // Visual-timing radius (raw): inner 0.7, arcs 1.0, strips 1.15.
+                            // Normalise by 1.15 → inner ≈ 0.6087, arcs ≈ 0.8696, strips 1.0.
                             let (_, radius) = geometry::led_polar(layout, i, lf);
                             radius / 1.15
                         }
@@ -380,9 +380,9 @@ mod tests {
     // Ripple on SlInf44 — tests added in commit 2 (2026-07-14)
     // =========================================================================
     //
-    // SlInf44 radial ripple: dist = physical_radius / 1.15 (normalised to 0..=1).
-    //   inner ring: radius 0.4 → dist ≈ 0.348
-    //   arcs:       radius 1.0 → dist ≈ 0.870
+    // SlInf44 radial ripple: dist = visual_radius / 1.15 (normalised to 0..=1).
+    //   inner ring: radius 0.7 → dist ≈ 0.6087
+    //   arcs:       radius 1.0 → dist ≈ 0.8696
     //   strips:     radius 1.15 → dist = 1.0
     //
     // Wavefront r = t; brightness = exp(−(dist − r)² / TWO_SIGMA_SQ) × (1 − t).
@@ -400,46 +400,82 @@ mod tests {
         frame[range].iter().flat_map(|c| c.iter().copied()).max().unwrap_or(0)
     }
 
-    // ---- at t=0.35: inner ring (dist≈0.348) is near the wavefront and bright;
-    //      arcs (dist≈0.870) are effectively black ----
+    // ---- at t=0.20: dark lead-in — wavefront (r=0.20) has not reached any segment ----
     //
-    // inner ring: dist ≈ 0.4/1.15 = 0.34783, r = 0.35
-    //   (dist−r)² = (−0.00217)² ≈ 4.71e-6 → exp(−4.71e-6/0.0072) ≈ 0.9993
-    //   fade = 0.65 → brightness ≈ 0.6495 → channel ≈ 166
-    //
-    // arcs: dist ≈ 1.0/1.15 = 0.8696, r = 0.35
-    //   (dist−r)² ≈ 0.2700 → exp(−37.5) ≈ 0 → channel 0
+    // All segment dists are ≥ 0.6087 (inner ring). With r=0.20:
+    //   inner ring: (0.6087−0.20)² = 0.1670 → exp(−23.2) ≈ 0 → channel 0
+    //   arcs:       (0.8696−0.20)² = 0.4480 → exp(−62.2) ≈ 0 → channel 0
+    //   strips:     (1.0−0.20)²    = 0.6400 → exp(−88.9) ≈ 0 → channel 0
+    // All segments must be near-black.
 
     #[test]
-    fn t035_slinf44_inner_bright_arcs_black() {
-        let frame = render(&spec(), &sl_inf44_fans_ripple(), 0.35);
+    fn t020_slinf44_all_dark_lead_in() {
+        let frame = render(&spec(), &sl_inf44_fans_ripple(), 0.2);
 
-        // Inner ring: indices 0-7. All should be bright.
+        // All 44 LEDs must be near-black (channel ≤ 4) — wavefront hasn't reached any segment.
+        let peak = max_channel_slice(&frame, 0..44);
+        assert!(
+            peak <= 4,
+            "at t=0.20, wavefront (r=0.20) has not reached inner ring (dist≈0.609): \
+             all LEDs must be near-black, got peak={peak}"
+        );
+    }
+
+    // ---- at t=0.61: inner ring (dist≈0.6087) is near the wavefront and bright;
+    //      arcs (dist≈0.8696) are effectively black ----
+    //
+    // inner ring: dist ≈ 0.7/1.15 = 0.60870, r = 0.61
+    //   (dist−r)² = (−0.00130)² ≈ 1.69e-6 → exp(−1.69e-6/0.0072) ≈ 0.9998
+    //   fade = 0.39 → brightness ≈ 0.3899 → channel ≈ 99
+    //
+    // arcs: dist ≈ 1.0/1.15 = 0.8696, r = 0.61
+    //   (dist−r)² = (0.2596)² ≈ 0.06739 → exp(−9.36) ≈ 8.6e-5 → channel ≈ 0
+    //
+    // strips: dist = 1.0, r = 0.61
+    //   (dist−r)² = (0.39)² = 0.1521 → exp(−21.1) ≈ 0 → channel 0
+
+    #[test]
+    fn t061_slinf44_inner_bright_arcs_black() {
+        let frame = render(&spec(), &sl_inf44_fans_ripple(), 0.61);
+
+        // Inner ring: indices 0-7. Wavefront r≈dist≈0.6087 → bright.
         let inner_peak = max_channel_slice(&frame, 0..8);
         assert!(
-            inner_peak > 100,
-            "inner ring at t=0.35 (dist≈0.348≈r) must be bright, got peak={inner_peak}"
+            inner_peak > 80,
+            "inner ring at t=0.61 (dist≈0.6087≈r) must be bright, got peak={inner_peak}"
         );
 
-        // Left arcs: indices 8-17. Should be near-black (dist 0.870, far from r=0.35).
+        // Left arcs: indices 8-17. dist≈0.8696, far from r=0.61 → near-black.
         let arc_peak = max_channel_slice(&frame, 8..18);
         assert!(
             arc_peak <= 4,
-            "left arc at t=0.35 (dist≈0.870) must be near-black, got peak={arc_peak}"
+            "left arc at t=0.61 (dist≈0.8696) must be near-black, got peak={arc_peak}"
         );
 
         // Right arcs: indices 26-35. Same reasoning.
         let rarc_peak = max_channel_slice(&frame, 26..36);
         assert!(
             rarc_peak <= 4,
-            "right arc at t=0.35 must be near-black, got peak={rarc_peak}"
+            "right arc at t=0.61 must be near-black, got peak={rarc_peak}"
+        );
+
+        // Strips: dist=1.0, also far from r=0.61 → near-black.
+        let lstrip_peak = max_channel_slice(&frame, 18..26);
+        let rstrip_peak = max_channel_slice(&frame, 36..44);
+        assert!(
+            lstrip_peak <= 4,
+            "left strip at t=0.61 (dist=1.0) must be near-black, got peak={lstrip_peak}"
+        );
+        assert!(
+            rstrip_peak <= 4,
+            "right strip at t=0.61 (dist=1.0) must be near-black, got peak={rstrip_peak}"
         );
     }
 
     // ---- at t=0.95: inner ring is black; side strips carry the faded front ----
     //
-    // inner ring: dist ≈ 0.348, r = 0.95
-    //   (dist−r)² = (−0.602)² = 0.362 → exp(−50.3) ≈ 0 → channel 0
+    // inner ring: dist ≈ 0.7/1.15 = 0.6087, r = 0.95
+    //   (dist−r)² = (−0.3413)² = 0.1165 → exp(−16.2) ≈ 0 → channel 0
     //
     // strips: dist = 1.0, r = 0.95
     //   (dist−r)² = 0.05² = 0.0025 → exp(−0.347) ≈ 0.707
