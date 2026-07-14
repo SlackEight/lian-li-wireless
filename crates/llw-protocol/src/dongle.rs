@@ -172,6 +172,47 @@ impl<T: UsbIo> Dongle<T> {
         Ok(())
     }
 
+    /// Send a bind (or unbind) frame 6× with 30ms gaps between sends.
+    ///
+    /// Blocking: ~180ms+ (5 gaps × 30ms + 6 × 4-chunk USB writes).
+    /// Upstream burst semantics: the repeated transmission compensates for
+    /// RF packet loss during the handover window. The 30ms gap gives the
+    /// device firmware time to process each attempt before the next arrives.
+    /// The gap is NOT added after the final send (burst ends immediately after
+    /// the 6th frame's last chunk).
+    ///
+    /// `frame` must be a `bind_frame(...)` result. `channel` and `rx_type`
+    /// are the device's CURRENT reported channel and rx_type (not the target).
+    pub fn send_bind_burst(&mut self, frame: &RfFrame, channel: u8, rx_type: u8) -> Result<()> {
+        for i in 0..6u8 {
+            self.send_rf_frame(frame, channel, rx_type)?;
+            if i < 5 {
+                thread::sleep(Duration::from_millis(30));
+            }
+        }
+        Ok(())
+    }
+
+    /// Persist the current bind table to device flash by sending a SaveConfig
+    /// frame 3× with 200ms gaps between sends.
+    ///
+    /// The entire 4-chunk USB write is repeated 3 times (each repetition is
+    /// one `send_rf_frame` call addressed with `rx_type=0xFF`). The 200ms
+    /// inter-set gap is required for flash write completion (M3 discovery:
+    /// devices need an RF settle window after SaveConfig; callers should
+    /// follow this call with an RF settle window of at least 200ms before
+    /// resuming normal RF traffic to avoid corrupting the flash write).
+    pub fn send_save_config(&mut self, master_mac: &[u8; 6], master_channel: u8) -> Result<()> {
+        let frame = frames::save_config_frame(master_mac);
+        for i in 0..3u8 {
+            self.send_rf_frame(&frame, master_channel, 0xFF)?;
+            if i < 2 {
+                thread::sleep(Duration::from_millis(200));
+            }
+        }
+        Ok(())
+    }
+
     /// Upload an RGB animation (or single frame) to a device. Compresses,
     /// frames, and sends header (repeated) + data packets.
     /// Returns the effect index sent (compare against future device records
@@ -386,6 +427,40 @@ mod tests {
         assert!(parse_get_mac_response(&zero, 13, 5).is_none());
 
         assert!(parse_get_mac_response(&resp[..2], 13, 5).is_none()); // len > buffer: no panic
+    }
+
+    #[test]
+    fn send_bind_burst_writes_24_chunks_with_correct_headers() {
+        let mut d = Dongle::from_parts(FakeIo::default(), None);
+        let rf = crate::frames::bind_frame(
+            &[0xAA; 6], &[0x11; 6], 7, 3, &[100, 100, 0, 0],
+        );
+        let channel: u8 = 3;
+        let rx_type: u8 = 7;
+        d.send_bind_burst(&rf, channel, rx_type).expect("sent");
+        let writes = d.tx.written();
+        // 6 frames × 4 chunks = 24 USB writes
+        assert_eq!(writes.len(), 24, "burst must be exactly 6×4=24 writes");
+        for (i, w) in writes.iter().enumerate() {
+            // Every packet carries the correct channel and rx_type
+            assert_eq!(w[2], channel, "packet[{i}][2] must be channel");
+            assert_eq!(w[3], rx_type, "packet[{i}][3] must be rx_type");
+        }
+    }
+
+    #[test]
+    fn send_save_config_writes_12_chunks_with_0xff_rx() {
+        let mut d = Dongle::from_parts(FakeIo::default(), None);
+        let master_mac: [u8; 6] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        let master_channel: u8 = 5;
+        d.send_save_config(&master_mac, master_channel).expect("sent");
+        let writes = d.tx.written();
+        // 3 sends × 4 chunks = 12 USB writes
+        assert_eq!(writes.len(), 12, "save_config must be exactly 3×4=12 writes");
+        for (i, w) in writes.iter().enumerate() {
+            assert_eq!(w[2], master_channel, "packet[{i}][2] must be master_channel");
+            assert_eq!(w[3], 0xFF, "packet[{i}][3] must be 0xFF (rx_type for SaveConfig)");
+        }
     }
 
     #[test]

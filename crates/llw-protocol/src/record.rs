@@ -139,6 +139,26 @@ pub fn parse_device_record(data: &[u8], list_index: u8) -> Option<DeviceRecord> 
     })
 }
 
+/// Return the lowest RX slot in `1..=14` not currently used by any device
+/// whose `master_mac` equals `our_master`. Falls back to 1 if all 14 slots
+/// are taken (the supervisor must handle collisions at bind time).
+///
+/// Foreign-master records and records bound to a different master are
+/// ignored — we only care about slots committed to our own master.
+pub fn unused_rx(records: &[DeviceRecord], our_master: &[u8; 6]) -> u8 {
+    let used: std::collections::HashSet<u8> = records
+        .iter()
+        .filter(|r| &r.master_mac == our_master)
+        .map(|r| r.rx_type)
+        .collect();
+    for rx in 1u8..=14 {
+        if !used.contains(&rx) {
+            return rx;
+        }
+    }
+    1 // fallback: all 14 taken
+}
+
 /// Parsed GetDev response.
 #[derive(Debug, Default)]
 pub struct GetDevReport {
@@ -349,6 +369,60 @@ pub(crate) mod tests {
         raw[19] = 255;
         let rec = parse_device_record(&raw, 0).expect("valid record");
         assert_eq!(rec.fan_count, 4);
+    }
+
+    // ── unused_rx tests ──────────────────────────────────────────────────────
+
+    fn make_device_record_with_rx(master_mac: [u8; 6], rx_type: u8) -> DeviceRecord {
+        let raw = make_record(
+            [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, rx_type], // unique MAC per rx_type
+            master_mac,
+            2, rx_type, 0, 2, [36, 36, 0, 0], [700, 700, 0, 0], [86, 86, 0, 0],
+        );
+        parse_device_record(&raw, 0).expect("valid record")
+    }
+
+    #[test]
+    fn unused_rx_empty_air_returns_1() {
+        assert_eq!(super::unused_rx(&[], &MASTER), 1);
+    }
+
+    #[test]
+    fn unused_rx_skips_taken_slots() {
+        // slots 1 and 2 taken → expect 3
+        let records = vec![
+            make_device_record_with_rx(MASTER, 1),
+            make_device_record_with_rx(MASTER, 2),
+        ];
+        assert_eq!(super::unused_rx(&records, &MASTER), 3);
+    }
+
+    #[test]
+    fn unused_rx_fills_hole() {
+        // slots 1 and 3 taken → expect 2 (hole)
+        let records = vec![
+            make_device_record_with_rx(MASTER, 1),
+            make_device_record_with_rx(MASTER, 3),
+        ];
+        assert_eq!(super::unused_rx(&records, &MASTER), 2);
+    }
+
+    #[test]
+    fn unused_rx_all_14_taken_returns_1() {
+        let records: Vec<DeviceRecord> = (1u8..=14)
+            .map(|rx| make_device_record_with_rx(MASTER, rx))
+            .collect();
+        assert_eq!(super::unused_rx(&records, &MASTER), 1);
+    }
+
+    #[test]
+    fn unused_rx_ignores_foreign_master() {
+        let foreign_master = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+        // Foreign master occupies slots 1-14; our master has none → expect 1
+        let records: Vec<DeviceRecord> = (1u8..=14)
+            .map(|rx| make_device_record_with_rx(foreign_master, rx))
+            .collect();
+        assert_eq!(super::unused_rx(&records, &MASTER), 1);
     }
 
     #[test]
