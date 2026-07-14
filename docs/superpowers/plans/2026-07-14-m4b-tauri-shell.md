@@ -69,3 +69,9 @@
 - StatusData is consumed as JSON (no shared-crate type coupling for the frontend; the Rust command layer passes Values through) — the envelope version gate protects shape drift.
 - Placeholders for M4c/M4d keep the shell honest without blocking on the big screens.
 - Owner-glance gates are cheap (they're at the PC and enjoy visual checkpoints — workstyle memory) and match the "hardware/visual" interaction rule.
+
+---
+
+## Task 1 Wayland smoke — PASSED (2026-07-14 night, with one quirk)
+
+First launch crashed: `Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display` — webkit2gtk's DMABUF renderer vs NVIDIA on Wayland. Fix: `WEBKIT_DISABLE_DMABUF_RENDERER=1`, now set programmatically in main.rs (Wayland-only, respects user override). Also fixed: scaffold missed beforeDevCommand (Vite wasn't auto-started). With both fixes the window opens and renders correctly on KDE Plasma 6 Wayland — owner confirmed ("I see llw and pong"). Decorations/scaling: no issues reported.
