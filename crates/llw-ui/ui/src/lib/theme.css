@@ -97,14 +97,6 @@ html, body {
   box-shadow: 0 0 var(--bloom-size) var(--glow-color);
 }
 
-/* A card/chip with a tinted hairline border + soft outer shadow */
-.bloom-border {
-  border: 1px solid rgba(150, 90, 255, 0.25);
-  box-shadow:
-    0 0 24px rgba(90, 30, 220, 0.10),
-    inset 0 0 0 1px rgba(150, 90, 255, 0.08);
-}
-
 /* Surface card base */
 .card {
   background: var(--surface);

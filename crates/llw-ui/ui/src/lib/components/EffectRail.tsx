@@ -4,7 +4,7 @@
  * to the stage store (instant local canvas preview); Apply goes to the daemon
  * through the apply flow, which tracks the RF quiet window via rgb_in_sync.
  */
-import { useRef } from 'react';
+import { memo, useRef } from 'react';
 import {
   stageStore,
   specsEqual,
@@ -39,10 +39,12 @@ function hexToRgb(hex: string): Rgb {
 /** A palette swatch backed by a hidden native color input. */
 function Swatch({
   color,
+  disabled,
   onChange,
   onRemove,
 }: {
   color: Rgb;
+  disabled: boolean;
   onChange: (c: Rgb) => void;
   onRemove: () => void;
 }) {
@@ -54,6 +56,7 @@ function Swatch({
         className="swatch"
         style={{ background: rgbToHex(color) }}
         title={`${rgbToHex(color)} — click to edit`}
+        disabled={disabled}
         onClick={() => inputRef.current?.click()}
       />
       <input
@@ -70,6 +73,7 @@ function Swatch({
         className="swatch-remove"
         title="remove color"
         aria-label="remove color"
+        disabled={disabled}
         onClick={onRemove}
       >
         ✕
@@ -113,7 +117,10 @@ function Segmented<T extends string | number>({
   );
 }
 
-export default function EffectRail({ mac }: { mac: string | null }) {
+// memo: Lighting re-renders on every 1s status poll; the rail only depends on
+// `mac` plus its own stores (stage + apply flow, subscribed via hooks), so
+// this skips re-reconciling ~30 buttons each poll.
+export default memo(function EffectRail({ mac }: { mac: string | null }) {
   const { spec } = useStage();
   const flow = useApplyFlow();
 
@@ -157,6 +164,7 @@ export default function EffectRail({ mac }: { mac: string | null }) {
             <Swatch
               key={i}
               color={color}
+              disabled={busy}
               onChange={(c) =>
                 stageStore.setSpec({ colors: spec.colors.map((old, j) => (j === i ? c : old)) })
               }
@@ -219,11 +227,11 @@ export default function EffectRail({ mac }: { mac: string | null }) {
       <button
         type="button"
         className={dirty && !busy && state?.phase !== 'done' ? 'apply-btn bloom dirty' : 'apply-btn'}
-        disabled={mac === null || busy || (!dirty && state?.phase !== 'done')}
+        disabled={mac === null || busy || state?.phase === 'done' || !dirty}
         onClick={() => mac !== null && applyFlow.start(mac, spec)}
       >
         {applyLabel}
       </button>
     </div>
   );
-}
+});

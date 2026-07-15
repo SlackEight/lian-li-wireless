@@ -4,7 +4,7 @@ Linux support for Lian Li's 2.4GHz wireless ecosystem — UNI FAN wireless
 (SL-INF, SL V3, TL, CL), Strimer Wireless, and wireless AIOs — with a focus
 on rock-solid fan control and full dynamic RGB.
 
-**Status: M2 — reliability daemon (fans + RGB + link supervision) with systemd/udev packaging.** See
+**Status: M4 — full desktop app (Health, Devices with bind/unbind, Lighting stage, Cooling curves) over the reliability daemon.** See
 `docs/superpowers/specs/` for the design and roadmap (effect engine, Tauri UI).
 
 ## Requirements
@@ -77,11 +77,13 @@ The `llw-daemon` replaces `lianli-daemon` and both **cannot run simultaneously**
 ## Desktop app (llw-ui)
 
 Tauri 2 + React desktop app over the daemon: Health (link/reliability/sync),
-Devices (bind/unbind, rename), Lighting and Cooling (in progress).
+Devices (bind/unbind, rename), Lighting (live effect preview, presets), and
+Cooling (fan curves, sensor binding, slot assignment).
 
 Development (requires `npm` and the Tauri system deps — `webkit2gtk-4.1` on Arch):
 
     cd crates/llw-ui/ui && npm install
+    npm run build:wasm    # lighting preview engine (needs wasm-pack + the wasm32-unknown-unknown target)
     cd .. && cargo tauri dev
 
 The daemon must be running (the app shows an amber "daemon unreachable" banner

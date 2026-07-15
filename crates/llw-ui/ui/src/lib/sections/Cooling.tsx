@@ -535,7 +535,12 @@ export default function Cooling() {
           </div>
 
           <h2 className="subsection-title">Fan slots</h2>
-          {data === null || data.devices.length === 0 ? (
+          {data === null ? (
+            <div className="card-muted placeholder-card">
+              <span>Waiting for daemon data</span>
+              <span className="hint">polling status…</span>
+            </div>
+          ) : data.devices.length === 0 ? (
             <div className="card-muted placeholder-card">
               <span>No configured devices</span>
               <span className="hint">bind one from Devices</span>

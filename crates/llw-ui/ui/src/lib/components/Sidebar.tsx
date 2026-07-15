@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { SECTIONS, type Section } from '../sections.js';
 
 interface Props {
@@ -61,7 +62,10 @@ function SectionIcon({ section }: { section: Section }) {
   }
 }
 
-export default function Sidebar({ active, onSelect }: Props) {
+// memo: App re-renders on every 1s status poll; the sidebar's props (active
+// section + the stable setState) only change on navigation, so this skips
+// re-reconciling the four nav buttons and their inline SVGs each poll.
+export default memo(function Sidebar({ active, onSelect }: Props) {
   return (
     <aside className="sidebar">
       <div className="wordmark" aria-label="llw">
@@ -86,4 +90,4 @@ export default function Sidebar({ active, onSelect }: Props) {
       </nav>
     </aside>
   );
-}
+});
