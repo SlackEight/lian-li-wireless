@@ -37,6 +37,7 @@ pub enum Request {
     SetEffect { mac: String, effect: llw_effects::EffectSpec },
     Bind { mac: String },
     Unbind { mac: String },
+    ListSensors,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -68,6 +69,25 @@ pub struct StatusData {
     pub devices: Vec<DeviceStatus>,
     pub air: Vec<AirDeviceStatus>,
     pub pending: Option<PendingOpStatus>,
+    /// Per-curve smoothed sensor temperature, in config order.
+    /// Additive envelope-v1 field (absent from older daemons → defaults empty).
+    #[serde(default)]
+    pub curves: Vec<CurveStatus>,
+}
+
+/// A configured curve's current sensor reading — the EMA-smoothed value the
+/// fan controller uses. None until the sensor has resolved and produced a
+/// plausible reading this session.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CurveStatus {
+    pub name: String,
+    pub sensor_c: Option<f32>,
+}
+
+/// Reply payload for [`Request::ListSensors`].
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListSensorsData {
+    pub sensors: Vec<crate::sensors::SensorInfo>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -253,6 +273,85 @@ mod tests {
     fn unknown_method_is_a_parse_error() {
         let line = r#"{"v":1,"method":"Frobnicate"}"#;
         assert!(serde_json::from_str::<RequestEnvelope>(line).is_err());
+    }
+
+    #[test]
+    fn list_sensors_envelope_and_reply_shape() {
+        let line = r#"{"v":1,"method":"ListSensors"}"#;
+        let env: RequestEnvelope = serde_json::from_str(line).unwrap();
+        assert!(matches!(env.req, Request::ListSensors));
+
+        // Reply shape: {"sensors":[{chip, label, spec, current_c}]} where
+        // `spec` is verbatim-usable as a config Curve's `sensor` field.
+        let data = ListSensorsData {
+            sensors: vec![
+                crate::sensors::SensorInfo {
+                    chip: "k10temp".into(),
+                    label: "Tctl".into(),
+                    spec: crate::config::SensorSpec {
+                        hwmon_name: "k10temp".into(),
+                        input: "temp1_input".into(),
+                    },
+                    current_c: Some(41.25),
+                },
+                crate::sensors::SensorInfo {
+                    chip: "nvme".into(),
+                    label: "temp1".into(),
+                    spec: crate::config::SensorSpec {
+                        hwmon_name: "nvme".into(),
+                        input: "temp1_input".into(),
+                    },
+                    current_c: None,
+                },
+            ],
+        };
+        let v = serde_json::to_value(&data).unwrap();
+        assert_eq!(v["sensors"][0]["chip"], "k10temp");
+        assert_eq!(v["sensors"][0]["label"], "Tctl");
+        assert_eq!(v["sensors"][0]["spec"]["hwmon_name"], "k10temp");
+        assert_eq!(v["sensors"][0]["spec"]["input"], "temp1_input");
+        assert!((v["sensors"][0]["current_c"].as_f64().unwrap() - 41.25).abs() < 1e-6);
+        assert!(v["sensors"][1]["current_c"].is_null(), "failed read must be null, not omitted");
+        // The emitted spec deserializes directly as a config SensorSpec.
+        let spec: crate::config::SensorSpec =
+            serde_json::from_value(v["sensors"][0]["spec"].clone()).unwrap();
+        assert_eq!(spec.hwmon_name, "k10temp");
+        assert_eq!(spec.input, "temp1_input");
+    }
+
+    #[test]
+    fn status_curves_field_is_additive() {
+        // New daemons emit `curves` with per-curve temps (float or null).
+        let data = StatusData {
+            daemon_version: "test".into(),
+            link: None,
+            tx_wedged: false,
+            reliability: Telemetry {
+                total_dropouts: 0,
+                total_tier1: 0,
+                total_tier2: 0,
+                failed_tier1_streak: 0,
+            },
+            devices: vec![],
+            air: vec![],
+            pending: None,
+            curves: vec![
+                CurveStatus { name: "cpu".into(), sensor_c: Some(41.25) },
+                CurveStatus { name: "gpu".into(), sensor_c: None },
+            ],
+        };
+        let v = serde_json::to_value(&data).unwrap();
+        assert_eq!(v["curves"][0]["name"], "cpu");
+        assert!((v["curves"][0]["sensor_c"].as_f64().unwrap() - 41.25).abs() < 1e-6);
+        assert_eq!(v["curves"][1]["name"], "gpu");
+        assert!(v["curves"][1]["sensor_c"].is_null(), "unresolved sensor must be null");
+
+        // Pre-M4d status JSON (no `curves` key) still deserializes: additive field.
+        let old = r#"{"daemon_version":"0.1.0","link":null,"tx_wedged":false,
+            "reliability":{"total_dropouts":0,"total_tier1":0,"total_tier2":0,"failed_tier1_streak":0},
+            "devices":[],"air":[],"pending":null}"#;
+        let s: StatusData = serde_json::from_str(old).unwrap();
+        assert!(s.curves.is_empty(), "missing curves field must default to empty");
     }
 
     #[test]

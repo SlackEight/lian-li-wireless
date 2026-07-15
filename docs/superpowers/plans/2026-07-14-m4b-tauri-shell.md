@@ -49,11 +49,11 @@
 
 ### Task 5: Devices screen + bind/unbind UI
 
-- [ ] Configured devices: cards in the mockup's device-card style (name/mac/kind, fan count, RPM ring visual — static ring with RGB conic fill from current effect colors if available in config, else neutral; rename inline-edit → `set_config` with the device's `name`), unbind action behind a confirm dialog ("removes it from config and releases it on air").
-- [ ] Air section: non-Ours entries as rows — Unbound get a glowing **Bind** button (the ONE call-to-action with bloom); Foreign shown dimmed with "bound to another controller" and a disabled button (tooltip explains). Bind click → `bind(mac)` → progress states from `pending` in the status store (converging spinner → bound ✓ transitions the row into the configured list) — the daemon's refusal strings surface as inline toasts verbatim (incl. the auto-retried settling case: the Rust command does NOT retry; the UI shows "radio settling — retrying…" and re-invokes up to 3× 2s like the CLI).
-- [ ] Vitest: bind-flow state machine in the store (started → converging → success/failed paths against mocked status sequences).
-- [ ] **Owner session (live):** Devices screen against the real daemon — refusal toast on binding a bogus/bound mac; if the Strimer is installed by now, THE live bind happens here from the UI (closing M4a Task 6's deferral + M3's Strimer validation via a follow-up set-effect from the CLI or a temporary button). Record results.
-- [ ] Commit: `feat(ui): Devices screen — bind/unbind with live convergence`
+- [x] Configured devices: cards in the mockup's device-card style (name/mac/kind, fan count, RPM ring visual — static ring with RGB conic fill from current effect colors if available in config, else neutral; rename inline-edit → `set_config` with the device's `name`), unbind action behind a confirm dialog ("removes it from config and releases it on air").
+- [x] Air section: non-Ours entries as rows — Unbound get a glowing **Bind** button (the ONE call-to-action with bloom); Foreign shown dimmed with "bound to another controller" and a disabled button (tooltip explains). Bind click → `bind(mac)` → progress states from `pending` in the status store (converging spinner → bound ✓ transitions the row into the configured list) — the daemon's refusal strings surface as inline toasts verbatim (incl. the auto-retried settling case: the Rust command does NOT retry; the UI shows "radio settling — retrying…" and re-invokes up to 3× 2s like the CLI).
+- [x] Vitest: bind-flow state machine in the store (14 tests; settling marker matched to the CLI's; 15s convergence timeout) (started → converging → success/failed paths against mocked status sequences).
+- [ ] **Owner session (live):** DEFERRED to the final iteration pass / Strimer install (owner 2026-07-15: complete everything, single pass at the end) — Devices screen against the real daemon — refusal toast on binding a bogus/bound mac; if the Strimer is installed by now, THE live bind happens here from the UI (closing M4a Task 6's deferral + M3's Strimer validation via a follow-up set-effect from the CLI or a temporary button). Record results.
+- [x] Commit: `feat(ui): Devices screen — bind/unbind with live convergence`
 
 ### Task 6: Acceptance + record
 

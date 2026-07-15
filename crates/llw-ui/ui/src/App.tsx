@@ -3,6 +3,7 @@ import { type Section } from './lib/sections.js';
 import { useStatus } from './lib/stores/useStatus.js';
 import Sidebar from './lib/components/Sidebar.js';
 import DaemonBanner from './lib/components/DaemonBanner.js';
+import ToastArea from './lib/components/ToastArea.js';
 import Health from './lib/sections/Health.js';
 import Devices from './lib/sections/Devices.js';
 import Lighting from './lib/sections/Lighting.js';
@@ -28,6 +29,8 @@ export default function App() {
           {active === 'Cooling' && <Cooling />}
         </main>
       </div>
+
+      <ToastArea />
     </div>
   );
 }

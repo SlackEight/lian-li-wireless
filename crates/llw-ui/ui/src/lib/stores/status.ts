@@ -62,6 +62,13 @@ export interface AirDeviceStatus {
   last_seen_s: number;
 }
 
+/** In-flight bind/unbind op (llw-daemon's ipc::PendingOpStatus). */
+export interface PendingOp {
+  op: 'bind' | 'unbind';
+  mac: string;
+  state: 'converging' | 'failed';
+}
+
 export interface StatusData {
   daemon_version: string;
   /** null before channel/master acquisition. */
@@ -70,8 +77,8 @@ export interface StatusData {
   reliability: Telemetry;
   devices: DeviceStatus[];
   air: AirDeviceStatus[];
-  /** null or a pending bind/unbind op — typed properly in Task 5. */
-  pending: unknown;
+  /** null when no bind/unbind is in flight. */
+  pending: PendingOp | null;
 }
 
 /**

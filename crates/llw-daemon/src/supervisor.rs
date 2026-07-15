@@ -615,7 +615,7 @@ impl<T: UsbIo> Supervisor<T> {
     }
 
     fn answer(&mut self, req: crate::ipc::Request) -> crate::ipc::ResponseEnvelope {
-        use crate::ipc::{AirDeviceStatus, DeviceStatus, LinkStatus, PendingOpStatus, Request, ResponseEnvelope, StatusData};
+        use crate::ipc::{AirDeviceStatus, CurveStatus, DeviceStatus, LinkStatus, ListSensorsData, PendingOpStatus, Request, ResponseEnvelope, StatusData};
         match req {
             Request::Ping => ResponseEnvelope::ok(Some(serde_json::json!("pong"))),
             Request::Status => {
