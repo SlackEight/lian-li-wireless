@@ -668,6 +668,18 @@ impl<T: UsbIo> Supervisor<T> {
                         })
                         .collect(),
                     pending,
+                    // Config order (deterministic, unlike the runtime HashMap);
+                    // the EMA'd value the fan controller uses, None until the
+                    // sensor has produced a plausible reading.
+                    curves: self
+                        .cfg
+                        .curves
+                        .iter()
+                        .map(|c| CurveStatus {
+                            name: c.name.clone(),
+                            sensor_c: self.curves.get(&c.name).and_then(|rt| rt.ema.value()),
+                        })
+                        .collect(),
                 };
                 match serde_json::to_value(&data) {
                     Ok(v) => ResponseEnvelope::ok(Some(v)),
@@ -838,6 +850,13 @@ impl<T: UsbIo> Supervisor<T> {
                 });
                 ResponseEnvelope::ok(Some(serde_json::json!({"state": "started"})))
             }
+            Request::ListSensors => match sensors::enumerate(&self.hwmon_base) {
+                Ok(sensors) => match serde_json::to_value(&ListSensorsData { sensors }) {
+                    Ok(v) => ResponseEnvelope::ok(Some(v)),
+                    Err(e) => ResponseEnvelope::err(e.to_string()),
+                },
+                Err(e) => ResponseEnvelope::err(e.to_string()),
+            },
         }
     }
 
@@ -1173,6 +1192,31 @@ mod tests {
         let sup = Supervisor::new(
             cfg,
             std::env::temp_dir(),
+            Box::new(move || {
+                let rx = FakeIo::default();
+                for r in rx_script.clone() {
+                    rx.push_read(r);
+                }
+                Ok(Dongle::from_parts(FakeIo::default(), Some(rx)))
+            }),
+            Some(ipc_rx),
+            config_path,
+        );
+        (sup, ipc_tx, Instant::now())
+    }
+
+    /// Like `sim_with_ipc`, but with an explicit hwmon base for sensor-backed
+    /// configs (fake tree in a tempdir — tests never read the real /sys).
+    fn sim_with_ipc_hwmon(
+        cfg: Config,
+        hwmon_base: std::path::PathBuf,
+        rx_script: Vec<Vec<u8>>,
+        config_path: std::path::PathBuf,
+    ) -> (Supervisor<FakeIo>, std::sync::mpsc::Sender<crate::ipc::IpcCmd>, Instant) {
+        let (ipc_tx, ipc_rx) = std::sync::mpsc::channel();
+        let sup = Supervisor::new(
+            cfg,
+            hwmon_base,
             Box::new(move || {
                 let rx = FakeIo::default();
                 for r in rx_script.clone() {
@@ -2547,6 +2591,126 @@ mod tests {
         assert_eq!(pending.get("op").and_then(|v| v.as_str()), Some("bind"));
         assert_eq!(pending.get("state").and_then(|v| v.as_str()), Some("converging"));
         assert_eq!(pending.get("mac").and_then(|v| v.as_str()), Some("de:ad:be:ef:01:02"));
+    }
+
+    /// Status must expose each configured curve's smoothed sensor reading —
+    /// the same EMA value the fan controller uses — and null for a curve
+    /// whose sensor never resolved.
+    #[test]
+    fn status_includes_curve_temps() {
+        use crate::config::{Curve, SensorSpec};
+
+        // Fake hwmon tree: k10temp temp1 = 41.3°C. The "gpu" curve's chip
+        // does not exist → its sensor never resolves.
+        let dir = tempfile::tempdir().unwrap();
+        let hwmon0 = dir.path().join("hwmon0");
+        std::fs::create_dir_all(&hwmon0).unwrap();
+        std::fs::write(hwmon0.join("name"), "k10temp\n").unwrap();
+        std::fs::write(hwmon0.join("temp1_input"), "41300\n").unwrap();
+
+        let mut cfg = Config::new();
+        cfg.curves.push(Curve {
+            name: "cpu".into(),
+            sensor: SensorSpec { hwmon_name: "k10temp".into(), input: "temp1_input".into() },
+            points: vec![(29.0, 30.0), (52.0, 34.0)],
+        });
+        cfg.curves.push(Curve {
+            name: "gpu".into(),
+            sensor: SensorSpec { hwmon_name: "missing".into(), input: "temp1_input".into() },
+            points: vec![(30.0, 20.0), (70.0, 100.0)],
+        });
+        cfg.devices.push(DeviceConfig {
+            mac: "02:8b:51:62:32:e1".into(),
+            name: None,
+            slots: [
+                SlotSpeed::Curve("cpu".into()),
+                SlotSpeed::Percent(0),
+                SlotSpeed::Percent(0),
+                SlotSpeed::Percent(0),
+            ],
+            color: None,
+            effect: None,
+        });
+        cfg.control.tick_ms = 0; // fan tick every step
+        cfg.control.keepalive_ms = 1_000_000;
+        cfg.observation.poll_ms = 0; // poll every step
+
+        let rec = record_bytes([0; 4], [0; 4]);
+        let script = vec![getdev_resp(&[rec]); 10];
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut sup, ipc_tx, t0) = sim_with_ipc_hwmon(
+            cfg,
+            dir.path().to_path_buf(),
+            script,
+            tmp.path().join("config.json"),
+        );
+
+        // Acquire, then one fan-tick step so the cpu curve reads its sensor.
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+        let _ = sup.step(t0 + Duration::from_secs(1));
+
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Status,
+            reply: reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(2));
+        let resp = reply_rx.try_recv().unwrap();
+        assert!(resp.ok, "{:?}", resp.error);
+        let data = resp.data.unwrap();
+        let curves = data.get("curves").unwrap().as_array().unwrap();
+        assert_eq!(curves.len(), 2, "one entry per configured curve, in config order");
+        assert_eq!(curves[0]["name"], "cpu");
+        let c = curves[0]["sensor_c"].as_f64().unwrap();
+        assert!((c - 41.3).abs() < 0.01, "cpu sensor_c must be the EMA'd 41.3°C, got {c}");
+        assert_eq!(curves[1]["name"], "gpu");
+        assert!(curves[1]["sensor_c"].is_null(), "unresolvable sensor must be null");
+    }
+
+    /// ListSensors over IPC enumerates the supervisor's hwmon base, and each
+    /// emitted spec is verbatim-usable as a Curve's `sensor` (it resolves
+    /// against the same tree to the same reading).
+    #[test]
+    fn list_sensors_ipc_enumerates_fake_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let hwmon0 = dir.path().join("hwmon0");
+        std::fs::create_dir_all(&hwmon0).unwrap();
+        std::fs::write(hwmon0.join("name"), "k10temp\n").unwrap();
+        std::fs::write(hwmon0.join("temp1_input"), "41300\n").unwrap();
+        std::fs::write(hwmon0.join("temp1_label"), "Tctl\n").unwrap();
+
+        let rec = record_bytes([0; 4], [0; 4]);
+        let script = vec![getdev_resp(&[rec]); 4];
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut sup, ipc_tx, t0) = sim_with_ipc_hwmon(
+            bind_test_config(),
+            dir.path().to_path_buf(),
+            script,
+            tmp.path().join("config.json"),
+        );
+        let _ = sup.step(t0);
+
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::ListSensors,
+            reply: reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        let resp = reply_rx.try_recv().unwrap();
+        assert!(resp.ok, "{:?}", resp.error);
+        let data = resp.data.unwrap();
+        let sensors = data["sensors"].as_array().unwrap();
+        assert_eq!(sensors.len(), 1);
+        assert_eq!(sensors[0]["chip"], "k10temp");
+        assert_eq!(sensors[0]["label"], "Tctl");
+        assert!((sensors[0]["current_c"].as_f64().unwrap() - 41.3).abs() < 0.01);
+        // Verbatim usability: deserialize the emitted spec as a config
+        // SensorSpec and resolve it against the same tree.
+        let spec: crate::config::SensorSpec =
+            serde_json::from_value(sensors[0]["spec"].clone()).unwrap();
+        let sensor = crate::sensors::resolve(dir.path(), &spec).expect("spec must resolve");
+        assert!((sensor.read_c().unwrap() - 41.3).abs() < 0.001);
     }
 
     /// When the config has at least one curve, a successful bind auto-adds the

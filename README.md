@@ -74,6 +74,20 @@ The `llw-daemon` replaces `lianli-daemon` and both **cannot run simultaneously**
     ./target/release/llw set-color 1 FF0000
     ./target/release/llw status     # show daemon status (requires daemon running)
 
+## Desktop app (llw-ui)
+
+Tauri 2 + React desktop app over the daemon: Health (link/reliability/sync),
+Devices (bind/unbind, rename), Lighting and Cooling (in progress).
+
+Development (requires `npm` and the Tauri system deps — `webkit2gtk-4.1` on Arch):
+
+    cd crates/llw-ui/ui && npm install
+    cd .. && cargo tauri dev
+
+The daemon must be running (the app shows an amber "daemon unreachable" banner
+otherwise and reconnects automatically). Production build: `cargo tauri build`
+(packaging lands in M5).
+
 ## License
 
 MIT. Protocol knowledge ported from

@@ -81,3 +81,11 @@ First launch crashed: `Gdk-Message: Error 71 (Protocol error) dispatching to Way
 Owner glance FAILED on first pass: sidebar didn't reach the bottom, Health rendered below it. Diagnosis (headless-chromium screenshots + curl): in dev mode, vite-plugin-svelte served the **raw .svelte source as App.svelte's CSS module** (`?svelte&type=style&lang.css` returned the file verbatim), so the shell's scoped styles were dropped — production builds were unaffected. Reproduced on both vite 6 + plugin 5 and vite 8 + plugin 7. Trigger: importing `theme.css` from inside App.svelte's `<script>` block; moving the import to the entry file fixed dev rendering (verified by screenshot).
 
 The owner then asked (twice) for a mainstream framework. Decision: **switch the frontend to React 19 + Vite 7** while the surface is small (shell + placeholders, one logic module, 6 tests). Port kept everything byte-comparable: theme.css untouched, component styles consolidated verbatim into `src/lib/components.css`, markup to TSX, sections.ts/tests unchanged. Verified: `npm run build` + `vitest` 6/6 + `tsc --noEmit` green; dev-server screenshot pixel-matches the intended shell. All remaining M4 tasks build on React.
+
+## Task 6 — coordinator acceptance walk (2026-07-15, owner walk deferred to M4e-E2)
+
+Owner directive 2026-07-15: complete the whole UI autonomously, single owner iteration pass at the end. Task 6's owner walk therefore folds into M4e-E2; this is the coordinator's walk.
+
+All four sections screenshot-verified via headless chromium against the dev server (browser = no Tauri bridge, so this also exercises the unreachable banner + dim on every section): shell/sidebar correct, Health cards, Devices waiting-state, Lighting/Cooling silhouettes all on-theme. Health was additionally verified LIVE against the real daemon at the Task 4 owner glance ("Looks good"). Added `?section=<name>` deep-link for tooling/screenshots. README gained the UI section. Gates at close: 36 vitest, tsc clean, build clean, workspace Rust suites green (259 + 3 presets tests).
+
+Punch list carried to M4e: none yet from layout; live-data Devices walk + live bind = E2/Strimer.
