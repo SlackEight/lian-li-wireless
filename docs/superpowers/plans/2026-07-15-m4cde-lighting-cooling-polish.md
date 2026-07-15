@@ -74,16 +74,16 @@
 
 ### Task D3: Cooling screen
 
-- [ ] `ui/src/lib/sections/Cooling.tsx` replaces the silhouette: curve list (from config; add/rename/delete curve with confirm), the editor for the selected curve with its sensor picker (dropdown from ListSensors, shows chip+label+current temp), per-device slot assignment matrix (device × slots 1..fan_count → SlotSpeed: fixed % input or curve select), live RPM/PWM per slot from status alongside.
-- [ ] All writes: get_config → mutate → set_config round-trip; errors toast verbatim; NO debounced auto-save — explicit Save button per the Apply pattern (dirty-state bloom), since SetConfig hits fan control immediately.
-- [ ] Guardrail: refuse (client-side, with toast) deleting a curve still referenced by any slot.
-- [ ] Vitest: config mutation helpers (assign slot, delete-curve guard, save payload shape).
-- [ ] Gates green. Commit: `feat(ui): Cooling screen — curves, sensors, slot assignment`
+- [x] `ui/src/lib/sections/Cooling.tsx` replaces the silhouette: curve list (from config; add/rename/delete curve with confirm), the editor for the selected curve with its sensor picker (dropdown from ListSensors, shows chip+label+current temp), per-device slot assignment matrix (device × slots 1..fan_count → SlotSpeed: fixed % input or curve select), live RPM/PWM per slot from status alongside.
+- [x] All writes: get_config → mutate → set_config round-trip; errors toast verbatim; NO debounced auto-save — explicit Save button per the Apply pattern (dirty-state bloom), since SetConfig hits fan control immediately.
+- [x] Guardrail: refuse (client-side, with toast) deleting a curve still referenced by any slot.
+- [x] Vitest: config mutation helpers (19 tests incl. rename-rewrites-references; SlotSpeed untagged number|string pinned).
+- [x] Gates green. Commit: `feat(ui): Cooling screen — curves, sensors, slot assignment` (5a373cb; adds the list_sensors Tauri command)
 
 ### Task D4: M4d acceptance (coordinator)
 
-- [ ] Coordinator: screenshot review; live check against the real daemon — read current curve, move a point 1–2% and Save, verify fan PWM follows within a poll or two, then restore the original curve EXACTLY (get_config snapshot before touching anything). Record results.
-- [ ] Commit: `docs: M4d acceptance`
+- [x] Coordinator live check PASSED (2026-07-15 16:25): daemon REDEPLOYED first (running binary predates presets/ListSensors/Status.curves; re-acquired link in ~10s, RGB re-asserted). Status.curves live (61.8 °C EMA under compile load, fans tracking at 88). Nudge test: +6 duty on all points → desired_pwm 88→103 (+6% of 255, one control tick); exact-snapshot restore → 88, GetConfig byte-identical. Layout screenshot verified (unreachable variant; full-data walk = E2).
+- [x] Commit: `docs: M4d acceptance`
 
 ## M4e — Polish + final acceptance
 
