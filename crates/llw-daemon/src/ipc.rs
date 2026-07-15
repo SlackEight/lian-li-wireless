@@ -228,6 +228,28 @@ mod tests {
     }
 
     #[test]
+    fn set_config_envelope_carries_presets_through() {
+        // Presets are pass-through data: SetConfig must parse them and the
+        // GetConfig handler's `serde_json::to_value(&cfg)` must emit them back.
+        let line = r#"{"v":1,"method":"SetConfig","config":{
+            "schema_version": 1,
+            "presets": [
+                {"name":"ocean","effect":{"kind":"ripple","colors":[[0,0,255]],"speed":2,"direction":"reverse","brightness":3}},
+                {"name":"plain","effect":{"kind":"breathing"}}
+            ]}}"#;
+        let env: RequestEnvelope = serde_json::from_str(line).unwrap();
+        let Request::SetConfig { config } = env.req else { panic!("expected SetConfig") };
+        assert_eq!(config.presets.len(), 2);
+        assert_eq!(config.presets[0].name, "ocean");
+        assert_eq!(config.presets[0].effect.colors, vec![[0u8, 0, 255]]);
+        assert_eq!(config.presets[1].effect.speed, 3, "EffectSpec serde defaults must fill");
+        // GetConfig path (same serialization the handler performs)
+        let v = serde_json::to_value(&config).unwrap();
+        assert_eq!(v["presets"][0]["name"], "ocean");
+        assert_eq!(v["presets"][1]["effect"]["speed"], 3);
+    }
+
+    #[test]
     fn unknown_method_is_a_parse_error() {
         let line = r#"{"v":1,"method":"Frobnicate"}"#;
         assert!(serde_json::from_str::<RequestEnvelope>(line).is_err());

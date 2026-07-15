@@ -20,6 +20,11 @@ pub struct Config {
     pub reliability: ReliabilityConfig,
     #[serde(default)]
     pub observation: ObservationConfig,
+    /// Saved effect presets. Pass-through data for the UI: the daemon stores
+    /// and round-trips these via GetConfig/SetConfig but never interprets,
+    /// validates, or applies them.
+    #[serde(default)]
+    pub presets: Vec<Preset>,
 }
 
 /// A named temp→speed curve bound to a hwmon sensor.
@@ -76,6 +81,14 @@ pub struct StaticColor {
     pub rgb: [u8; 3],
     /// 0..=4, L-Connect-compatible scale (4 = full).
     pub brightness: u8,
+}
+
+/// A named effect the UI offers as a one-click starting point (M4c).
+/// Storage only — see the `presets` field on [`Config`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Preset {
+    pub name: String,
+    pub effect: llw_effects::EffectSpec,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,6 +346,47 @@ mod tests {
         let cfg: Config = serde_json::from_str(partial).unwrap();
         assert_eq!(cfg.observation.poll_ms, 100);
         assert_eq!(cfg.observation.consecutive_polls, 2);
+    }
+
+    #[test]
+    fn pre_m4c_config_files_have_no_presets() {
+        // shape written before the presets field existed (M4c)
+        let old = r#"{
+            "schema_version": 1,
+            "curves": [],
+            "devices": []
+        }"#;
+        let cfg: Config = serde_json::from_str(old).unwrap();
+        assert!(cfg.presets.is_empty());
+    }
+
+    #[test]
+    fn presets_roundtrip() {
+        use llw_effects::{Direction, EffectKind, EffectSpec};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = Config::new();
+        // full spec, palette included
+        cfg.presets.push(Preset {
+            name: "ocean".into(),
+            effect: EffectSpec {
+                kind: EffectKind::Meteor,
+                colors: vec![[0, 64, 255], [0, 255, 200], [255, 255, 255]],
+                speed: 2,
+                direction: Direction::Reverse,
+                brightness: 3,
+            },
+        });
+        // minimal wire shape — everything but `kind` filled by EffectSpec serde defaults
+        let minimal: Preset =
+            serde_json::from_str(r#"{"name": "plain", "effect": {"kind": "breathing"}}"#).unwrap();
+        assert_eq!(minimal.effect.speed, 3);
+        assert_eq!(minimal.effect.brightness, 4);
+        assert!(minimal.effect.colors.is_empty());
+        cfg.presets.push(minimal);
+        cfg.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.presets, cfg.presets);
     }
 
     #[test]
