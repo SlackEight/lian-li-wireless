@@ -901,3 +901,400 @@
   font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
+
+/* ── Cooling ── */
+
+/* Header row: title on the left, Save/Discard bar blooms in on the right */
+.cooling-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-4);
+}
+
+.save-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  animation: fade-in 140ms ease;
+}
+
+/* THE call-to-action (mirror of .bind-btn): accent fill; pair with .bloom */
+.btn-accent {
+  --glow-color: rgba(110, 40, 255, 0.45);
+  padding: 6px 20px;
+  border-radius: var(--r-control);
+  border: 1px solid var(--accent-border);
+  background: var(--accent);
+  color: var(--accent-text);
+  font-family: var(--font);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.btn-accent:hover:enabled {
+  --glow-color: rgba(110, 40, 255, 0.7);
+  background: rgba(120, 60, 255, 0.25);
+}
+
+.btn-accent:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+  box-shadow: none;
+}
+
+/* Curve list | editor */
+.cooling-layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: var(--s-4);
+  align-items: start;
+}
+
+.cooling-curves {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.cooling-curves-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.cooling-curves-head .card-title {
+  margin-bottom: 0;
+}
+
+.curve-add-btn {
+  padding: 2px 10px;
+  border-radius: var(--r-chip);
+  border: 1px solid var(--hairline);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--font);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease;
+}
+
+.curve-add-btn:hover {
+  color: var(--accent-text);
+  border-color: var(--accent-border);
+}
+
+.curve-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.curve-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-control);
+  border: 1px solid transparent;
+}
+
+.curve-row.selected {
+  background: var(--accent);
+  border-color: var(--accent-border);
+}
+
+.curve-row-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* The whole unselected row body is one quiet button */
+.curve-row-info.as-button {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-family: var(--font);
+  text-align: left;
+  cursor: pointer;
+}
+
+.curve-row-name-static,
+.curve-row-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.curve-row-info.as-button:hover .curve-row-name-static {
+  color: var(--text);
+}
+
+/* Selected row: the name is the rename affordance (Devices idiom) */
+.curve-row-name {
+  display: block;
+  max-width: 100%;
+  border: none;
+  border-bottom: 1px dashed transparent;
+  background: transparent;
+  padding: 0;
+  font-family: var(--font);
+  color: var(--accent-text);
+  text-align: left;
+  cursor: text;
+  transition: border-color 120ms ease;
+}
+
+.curve-row-name:hover {
+  border-bottom-color: rgba(201, 173, 255, 0.4);
+}
+
+.curve-row-name-input {
+  display: block;
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--accent-border);
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  outline: none; /* the accent underline is the focus cue */
+}
+
+.curve-row-meta {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.curve-row.selected .curve-row-meta {
+  color: var(--accent-text);
+  opacity: 0.65;
+}
+
+/* Quiet ✕ that only turns red on hover (cf. .unbind-btn) */
+.curve-delete-btn {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+.curve-delete-btn:hover {
+  color: var(--danger);
+}
+
+/* Editor panel */
+.cooling-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  min-width: 0;
+}
+
+.cooling-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-4);
+}
+
+.cooling-editor-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sensor-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* Native select, themed (also used per fan slot) */
+.sensor-select,
+.slot-select {
+  max-width: 260px;
+  padding: 4px var(--s-2);
+  border-radius: var(--r-control);
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 120ms ease;
+}
+
+.sensor-select:hover:enabled,
+.slot-select:hover:enabled {
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.sensor-select:disabled,
+.slot-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.cooling-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-1);
+  padding: var(--s-6) var(--s-4);
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.cooling-empty.tall {
+  padding: 96px var(--s-4);
+}
+
+/* Slot assignment matrix */
+.slot-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: var(--s-4);
+}
+
+.slot-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+
+.slot-card-kind {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.slot-none {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.slot-grid {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto auto;
+  column-gap: var(--s-3);
+  row-gap: var(--s-2);
+  align-items: center;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.slot-cell {
+  color: var(--text-dim);
+  text-align: right;
+  min-width: 0;
+}
+
+.slot-cell.head {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.slot-cell.name,
+.slot-cell.mode {
+  text-align: left;
+}
+
+.slot-cell.name {
+  color: var(--text-muted);
+}
+
+.slot-cell.num {
+  min-width: 44px;
+}
+
+.slot-cell .slot-select {
+  width: 100%;
+  max-width: none;
+}
+
+.slot-pct-input {
+  width: 58px;
+  padding: 3px var(--s-2);
+  border-radius: var(--r-control);
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-family: var(--font);
+  font-size: 12px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.slot-pct-input:focus {
+  outline: none;
+  border-color: var(--accent-border);
+}
+
+.slot-pct-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.slot-curve-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* Name-prompt dialog input (rides the .dialog frame) */
+.dialog-input {
+  width: 100%;
+  margin-top: var(--s-3);
+  padding: 6px var(--s-3);
+  border-radius: var(--r-control);
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+}
+
+.dialog-input:focus {
+  outline: none;
+  border-color: var(--accent-border);
+}

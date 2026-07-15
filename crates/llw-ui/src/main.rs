@@ -28,6 +28,7 @@ fn main() {
             commands::set_color,
             commands::get_config,
             commands::set_config,
+            commands::list_sensors,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

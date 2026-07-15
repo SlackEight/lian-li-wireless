@@ -69,6 +69,17 @@ export interface PendingOp {
   state: 'converging' | 'failed';
 }
 
+/**
+ * A configured curve's current sensor reading (llw-daemon's ipc::CurveStatus)
+ * — the EMA-smoothed value the fan controller uses, in config order.
+ * `sensor_c` is null until the sensor has resolved and produced a plausible
+ * reading this session.
+ */
+export interface CurveStatus {
+  name: string;
+  sensor_c: number | null;
+}
+
 export interface StatusData {
   daemon_version: string;
   /** null before channel/master acquisition. */
@@ -79,6 +90,11 @@ export interface StatusData {
   air: AirDeviceStatus[];
   /** null when no bind/unbind is in flight. */
   pending: PendingOp | null;
+  /**
+   * Per-curve smoothed sensor temps, in config order. Additive envelope-v1
+   * field — optional so snapshots from pre-M4d daemons still type-check.
+   */
+  curves?: CurveStatus[];
 }
 
 /**

@@ -85,6 +85,15 @@ fn set_config_at(path: &Path, config: Value) -> Result<Value, String> {
     ipc::request(path, &req).map_err(Into::into)
 }
 
+#[tauri::command]
+pub fn list_sensors() -> Result<Value, String> {
+    list_sensors_at(&ipc::socket_path())
+}
+
+fn list_sensors_at(path: &Path) -> Result<Value, String> {
+    ipc::request(path, &json!({"v": 1, "method": "ListSensors"})).map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +183,26 @@ mod tests {
             json!({"v": 1, "method": "SetConfig", "config": cfg})
         );
         assert_eq!(data, Value::Null);
+    }
+
+    #[test]
+    fn list_sensors_round_trip() {
+        // Reply shape mirrors llw-daemon's ListSensorsData: sensors[].spec is
+        // a verbatim config SensorSpec; current_c is null on read failure.
+        let (_dir, path, server) = serve_one(
+            r#"{"v":1,"ok":true,"data":{"sensors":[{"chip":"k10temp","label":"Tctl","spec":{"hwmon_name":"k10temp","input":"temp1_input"},"current_c":41.25},{"chip":"nvme","label":"Composite","spec":{"hwmon_name":"nvme","input":"temp1_input"},"current_c":null}]}}"#,
+        );
+        let data = list_sensors_at(&path).unwrap();
+        assert_eq!(
+            server.join().unwrap(),
+            json!({"v": 1, "method": "ListSensors"})
+        );
+        assert_eq!(data["sensors"][0]["chip"], "k10temp");
+        assert_eq!(data["sensors"][0]["label"], "Tctl");
+        assert_eq!(data["sensors"][0]["spec"]["hwmon_name"], "k10temp");
+        assert_eq!(data["sensors"][0]["spec"]["input"], "temp1_input");
+        assert_eq!(data["sensors"][0]["current_c"], 41.25);
+        assert!(data["sensors"][1]["current_c"].is_null());
     }
 
     #[test]
