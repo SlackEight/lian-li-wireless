@@ -109,3 +109,28 @@
 - Coordinator live checks (C5 Apply, D4 curve nudge) touch the real daemon deliberately — they're the acceptance the owner would have done, done carefully (snapshot config first, restore exactly). Implementer agents still NEVER touch hardware or the real socket.
 - Curve interpolation parity pinned to Rust test vectors prevents the classic editor-shows-one-thing-daemon-does-another drift.
 - Risks: wasm-pack/vitest target mismatch (mitigated: pick target per what vitest can load, document); canvas perf on webkit2gtk (mitigated: fps throttle escape hatch).
+
+---
+
+## M4e-E2 — owner acceptance package (2026-07-16, autonomous run complete)
+
+**Gates at handover:** 280 Rust tests (104 daemon / 103 effects / 47 protocol / 15 ui / 11 wasm), zero clippy warnings workspace-wide; 119 vitest across 9 files (incl. 6 WASM↔native byte-parity tests); tsc clean; app + wasm builds green. Daemon redeployed 2026-07-15 16:24 (presets + ListSensors + Status.curves live).
+
+**Judgment calls taken without a glance (review candidates):**
+1. Health: `rgb_in_sync: null` renders a muted "no effect" badge (amber would read as permanently degraded); PWM bytes shown as % everywhere.
+2. Devices: failed bind/unbind ops toast verbatim then auto-clear to idle; ring tint precedence = effect palette → static color → neutral; config-fetch failures are silent (banner already tells that story).
+3. Stage: **Strimer has no canvas preview** — the status kind string drops the subtype (116/132/174/88 LEDs unknowable); needs a small daemon addition if wanted. Preview renders the device's exact hardware frame budget (what you see is what uploads); brightness is baked into frames (not double-applied).
+4. Apply flow: trusts `rgb_in_sync=true` only after the dip to false (or 3 polls for no-op applies); 20s timeout from the live 9s measurement; last-applied resets on app restart (Apply lights dirty until first apply).
+5. Cooling: EVERYTHING local-until-Save (incl. curve rename — unlike Devices rename which commits immediately, because SetConfig moves fans); switching a slot curve→fixed seeds the % from current desired PWM (no jump on save); new curves get [[30,20],[70,100]] + the first enumerated sensor; live temp cursor hides during an unsaved rename.
+6. Presets: chips load-not-apply; stored in daemon config (survive UI reinstall); duplicate names refused.
+7. System: `rust` pinned to Arch-archive 1.96.0 to match rust-wasm (self-heals on next `pacman -Syu`); wasm-pack/wasm-bindgen/rust-wasm installed from the archive (mirrors stale).
+
+**Punch list (owner decides):**
+- Curve editor: adding a point is pointer-only (move/remove have keys).
+- Segmented controls: each segment is a tab stop (no roving tabindex/arrow-keys).
+- Dialogs don't trap Tab (Escape/overlay work).
+- Ripple preview reads dark at rest — faithful to the parity-pinned hardware frames; a preview-only brightness lift is a design call.
+- Strimer stage preview → needs daemon to expose the subtype in status.
+- Physical Strimer install still pending → live bind from the Devices screen + M3 effects validation in one session.
+
+**Deferred-to-this-session validations:** live Devices walk with real data, live bind (Strimer), the Stage canvas visual (frames are parity-pinned; the look is judged here).
