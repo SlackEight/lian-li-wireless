@@ -53,8 +53,8 @@
 
 ### Task C5: M4c acceptance (coordinator)
 
-- [ ] Coordinator: headless screenshots of the Stage (static render; playback sanity via short screencast or two spaced screenshots), compare against `app-shell.html` Stage mockup; verify Apply against the LIVE daemon on the real SL-INF (one effect change, watch `rgb_in_sync` cycle false→true, confirm fans' RGB actually changed — coordinator-run, no owner needed). Record results in this plan.
-- [ ] Commit: `docs: M4c acceptance`
+- [x] Coordinator live Apply PASSED (2026-07-15 ~23:40): SetEffect runway on the real SL-INF → rgb_in_sync timeline `null → false×8 → true` (~9s: upload + 3s RF quiet + readback), restore to the original ripple confirmed in ~4s, config effect byte-identical after. The dip-then-true model in applyFlow matches hardware exactly. Timeout finding: 9s real confirm ⇒ APPLY_TIMEOUT_MS raised 12s→20s. Visual canvas check deferred to E2's Tauri session (browser has no daemon; parity of rendered frames is pinned by the WASM golden tests).
+- [x] Commit: `docs: M4c acceptance`
 
 ## M4d — Cooling
 

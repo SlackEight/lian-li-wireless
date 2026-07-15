@@ -22,8 +22,10 @@
 import type { StatusData, Timers } from './status.js';
 import type { EffectSpec } from './stage.js';
 
-/** Applying that hasn't confirmed after this long (from invoke-resolve) fails. */
-export const APPLY_TIMEOUT_MS = 12_000;
+/** Applying that hasn't confirmed after this long (from invoke-resolve) fails.
+ * Live C5 measurement: a full SL-INF upload+settle+readback confirmed at ~9s,
+ * so 12s left little margin — 20s covers slow polls without feeling stuck. */
+export const APPLY_TIMEOUT_MS = 20_000;
 /** Polls in `settling` after which a never-dipped `true` counts as confirmed. */
 export const STALE_TRUE_POLLS = 2;
 /** How long the "applied ✓" state lingers before returning to idle. */
