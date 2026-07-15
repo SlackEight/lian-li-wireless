@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod commands;
+mod ipc;
+
 #[tauri::command]
 fn ping() -> &'static str {
     "pong"
@@ -16,7 +19,16 @@ fn main() {
     }
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ping])
+        .invoke_handler(tauri::generate_handler![
+            ping,
+            commands::status,
+            commands::bind,
+            commands::unbind,
+            commands::set_effect,
+            commands::set_color,
+            commands::get_config,
+            commands::set_config,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

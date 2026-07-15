@@ -29,15 +29,15 @@
 - [ ] Sections: Health + Devices real (empty shells for now); Lighting/Cooling render an on-theme placeholder ("arrives in M4c/M4d" with a dimmed preview silhouette).
 - [ ] Daemon-unreachable banner component (slides down, amber, "daemon unreachable — retrying"; content dims but stays rendered) — wired in Task 4.
 - [ ] Vitest setup + first store test scaffold. Frontend `npm run build` + `npm run test` green.
-- [ ] **Owner glance:** shell up in dev mode, clicks the four sections, confirms it reads as the mockups' language.
-- [ ] Commit: `feat(ui): Nocturne Charged theme + section shell`
+- [x] **Owner glance:** shell up in dev mode, clicks the four sections, confirms it reads as the mockups' language. — PASSED 2026-07-15 ("Yup, everything looks right"), after the React port; see post-mortem below.
+- [x] Commit: `feat(ui): Nocturne Charged theme + section shell` (3b616ed, includes the React port)
 
 ### Task 3: IPC client (Rust) + Tauri commands
 
-- [ ] `crates/llw-ui/src/ipc.rs`: one-shot request fn (connect `$XDG_RUNTIME_DIR/llw-daemon.sock`, send envelope v1 line, read reply line, parse `ResponseEnvelope`-shaped JSON) — mirror the CLI's proven code; typed error for unreachable-socket (front end distinguishes "daemon down" from "request failed").
-- [ ] Commands: `status()`, `bind(mac)`, `unbind(mac)`, `set_effect(mac, spec)`, `set_color(mac, rgb, brightness)`, `get_config()`, `set_config(json)` — all returning `Result<serde_json::Value, String>` (the daemon's error strings pass through verbatim; the UI renders them).
-- [ ] Tests: spawn a real `UnixListener` in-test serving canned envelope replies → each command round-trips; unreachable socket → the typed error. (`cargo test -p llw-ui`.)
-- [ ] Commit: `feat(ui): daemon IPC client + Tauri commands`
+- [x] `crates/llw-ui/src/ipc.rs`: one-shot request fn (connect `$XDG_RUNTIME_DIR/llw-daemon.sock`, send envelope v1 line, read reply line, parse `ResponseEnvelope`-shaped JSON) — mirror the CLI's proven code; typed error for unreachable-socket (front end distinguishes "daemon down" from "request failed").
+- [x] Commands: `status()`, `bind(mac)`, `unbind(mac)`, `set_effect(mac, spec)`, `set_color(mac, rgb, brightness)`, `get_config()`, `set_config(json)` — all returning `Result<serde_json::Value, String>` (the daemon's error strings pass through verbatim; the UI renders them).
+- [x] Tests: spawn a real `UnixListener` in-test serving canned envelope replies → each command round-trips; unreachable socket → the typed error. (`cargo test -p llw-ui`.)
+- [x] Commit: `feat(ui): daemon IPC client + Tauri commands` — 14 tests; commands split into src/commands.rs with path-injected `*_at` twins; unreachable errors carry the stable prefix `daemon unreachable` (frontend matches on it in Tasks 4/5); garbled replies classify as unreachable
 
 ### Task 4: Status store + Health screen (live data)
 
