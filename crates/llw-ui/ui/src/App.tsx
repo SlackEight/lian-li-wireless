@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { type Section } from './lib/sections.js';
+import { useStatus } from './lib/stores/useStatus.js';
 import Sidebar from './lib/components/Sidebar.js';
 import DaemonBanner from './lib/components/DaemonBanner.js';
 import Health from './lib/sections/Health.js';
@@ -10,8 +11,8 @@ import Cooling from './lib/sections/Cooling.js';
 export default function App() {
   const [active, setActive] = useState<Section>('Health');
 
-  // Daemon banner — wired to live data in Task 4
-  const daemonUnreachable = false;
+  const { daemonReachable } = useStatus();
+  const daemonUnreachable = !daemonReachable;
 
   return (
     <div className="shell">

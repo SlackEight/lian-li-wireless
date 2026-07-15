@@ -41,9 +41,9 @@
 
 ### Task 4: Status store + Health screen (live data)
 
-- [ ] `ui/src/lib/stores/status.svelte.ts`: poll `status` every 1s while `document.visibilityState === 'visible'` (pause hidden); exposes typed state (mirror StatusData incl. air + pending + reliability + link), `daemonReachable` flag driving the banner; exponential backoff to 5s while unreachable.
-- [ ] Health screen per spec: link card (master mac, channel, wedge banner if tx_wedged — red, prominent), reliability card (dropouts/tier1/tier2/streak with quiet numerals, sparkline optional-skip), per-device sync cards (rgb_sync badge green/amber, dropout streak, desired vs readback PWM, RPM). All state colors per the token rules.
-- [ ] Vitest: store polling/backoff logic (mock invoke), visibility pause.
+- [x] `ui/src/lib/stores/status.ts` (React port: framework-free store + useSyncExternalStore hook): poll `status` every 1s while `document.visibilityState === 'visible'` (pause hidden); exposes typed state (mirror StatusData incl. air + pending + reliability + link), `daemonReachable` flag driving the banner; exponential backoff to 5s while unreachable.
+- [x] Health screen per spec: link card (master mac, channel, wedge banner if tx_wedged — red, prominent), reliability card (dropouts/tier1/tier2/streak with quiet numerals, sparkline optional-skip), per-device sync cards (rgb_sync badge green/amber, dropout streak, desired vs readback PWM, RPM). All state colors per the token rules.
+- [x] Vitest: store polling/backoff logic (mock invoke), visibility pause. — 12 store tests, injected timers/visibility, no jsdom. Coordinator fixes: PWM bytes (0–255) now render as % (were shown raw with a % suffix). Unreachable banner + dim verified by headless screenshot (browser dev = no Tauri bridge = natural daemon-down).
 - [ ] **Owner glance:** Health screen live against the running daemon.
 - [ ] Commit: `feat(ui): status store + Health screen`
 
