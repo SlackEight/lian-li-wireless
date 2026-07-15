@@ -5,6 +5,7 @@ import { toastStore } from '../stores/useToasts.js';
 import { sliceToFanCount, type DeviceStatus } from '../stores/status.js';
 import CurveEditor from '../components/CurveEditor.js';
 import ConfirmDialog from '../components/ConfirmDialog.js';
+import NamePromptDialog from '../components/NamePromptDialog.js';
 import {
   type CoolingConfig,
   type ConfigCurve,
@@ -50,67 +51,7 @@ function describeRefs(refs: { device: string; slot: number }[]): string {
   return refs.map((r) => `${r.device} fan ${r.slot + 1}`).join(', ');
 }
 
-/* ── In-theme name prompt (Task 5 dialog idiom + an input) ── */
-
-function NamePromptDialog({
-  title,
-  confirmLabel,
-  onConfirm,
-  onCancel,
-}: {
-  title: string;
-  confirmLabel: string;
-  onConfirm: (name: string) => void;
-  onCancel: () => void;
-}) {
-  const [name, setName] = useState('');
-  const blank = name.trim() === '';
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onCancel();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onCancel]);
-
-  return (
-    <div className="dialog-overlay" onClick={onCancel}>
-      <div
-        className="dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="dialog-title">{title}</div>
-        <input
-          className="dialog-input"
-          placeholder="curve name"
-          autoFocus
-          value={name}
-          onChange={(e) => setName(e.currentTarget.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !blank) onConfirm(name);
-          }}
-        />
-        <div className="dialog-actions">
-          <button type="button" className="btn-quiet" onClick={onCancel}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="btn-accent"
-            disabled={blank}
-            onClick={() => onConfirm(name)}
-          >
-            {confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
+/* In-theme name prompt: extracted to components/NamePromptDialog.tsx (C4). */
 
 /* ── Curve list row (inline rename, Devices-style) ── */
 
@@ -624,6 +565,7 @@ export default function Cooling() {
         <NamePromptDialog
           title="Add curve"
           confirmLabel="Add"
+          placeholder="curve name"
           onConfirm={onAdd}
           onCancel={() => setAddOpen(false)}
         />

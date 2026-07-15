@@ -101,7 +101,7 @@ export function clampSpec(spec: EffectSpec): EffectSpec {
   };
 }
 
-function specsEqual(a: EffectSpec, b: EffectSpec): boolean {
+export function specsEqual(a: EffectSpec, b: EffectSpec): boolean {
   return (
     a.kind === b.kind &&
     a.speed === b.speed &&
@@ -110,6 +110,22 @@ function specsEqual(a: EffectSpec, b: EffectSpec): boolean {
     a.colors.length === b.colors.length &&
     a.colors.every((c, i) => c[0] === b.colors[i][0] && c[1] === b.colors[i][1] && c[2] === b.colors[i][2])
   );
+}
+
+/**
+ * Fill a wire-shape spec (possibly partial — presets saved by other tools may
+ * rely on serde defaults) into a fully-populated, clamped EffectSpec. Loading
+ * via `setSpec` alone would merge onto the CURRENT working spec instead of
+ * the serde defaults, silently changing what the preset means.
+ */
+export function specFromWire(wire: Partial<EffectSpec> & { kind: EffectKind }): EffectSpec {
+  return clampSpec({
+    kind: wire.kind,
+    colors: wire.colors ?? [],
+    speed: wire.speed ?? DEFAULT_SPEED,
+    direction: wire.direction ?? 'forward',
+    brightness: wire.brightness ?? DEFAULT_BRIGHTNESS,
+  });
 }
 
 /* ── Geometry — mirror of llw-effects' serde shapes (geometry.rs):
