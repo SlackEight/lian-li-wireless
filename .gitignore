@@ -3,3 +3,5 @@
 /.superpowers
 crates/llw-ui/ui/node_modules
 crates/llw-ui/ui/dist
+# wasm-pack output — build with `npm run build:wasm` (from crates/llw-ui/ui)
+crates/llw-ui/ui/src/lib/wasm-pkg

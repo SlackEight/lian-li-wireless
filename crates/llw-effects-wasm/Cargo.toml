@@ -1,0 +1,24 @@
+[package]
+name = "llw-effects-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WASM (wasm-bindgen) bridge over llw-effects for the UI preview canvas"
+
+[lib]
+# cdylib for the wasm-pack build, rlib so native tests (goldens) can link it.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+llw-effects = { path = "../llw-effects" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Pinned exactly to the system `wasm-bindgen` CLI version (pacman extra/wasm-bindgen
+# 0.2.123). `npm run build:wasm` uses `wasm-pack --mode no-install`, which requires
+# the crate and CLI versions to match. Bump both together.
+wasm-bindgen = "=0.2.123"
+
+# Skip wasm-opt: keeps builds hermetic (no binaryen download) and the preview
+# workload doesn't need it.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
