@@ -801,3 +801,103 @@
   border-color: rgba(232, 168, 75, 0.4);
   color: var(--warn);
 }
+
+/* ── Curve editor ── */
+/* Quiet purple-tinted range from the Cooling silhouette mockup; the ONE
+   saturated element is the live-temp glow dot. */
+.curve-editor {
+  position: relative;
+}
+
+.curve-editor.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.curve-editor-svg {
+  display: block;
+  width: 100%;
+  height: 280px;
+  touch-action: none; /* pointer-capture dragging */
+  user-select: none;
+}
+
+.curve-grid-line {
+  stroke: rgba(255, 255, 255, 0.05);
+  stroke-width: 1;
+}
+
+.curve-axis-line {
+  stroke: rgba(255, 255, 255, 0.15);
+  stroke-width: 1;
+}
+
+.curve-axis-label {
+  fill: var(--text-muted);
+  font-family: var(--font);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.curve-path {
+  stroke: rgba(120, 60, 255, 0.5);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+  pointer-events: none;
+}
+
+.curve-area {
+  fill: rgba(80, 30, 200, 0.07);
+  pointer-events: none;
+}
+
+.curve-hit {
+  fill: transparent;
+  cursor: crosshair;
+}
+
+.curve-point {
+  fill: rgba(150, 90, 255, 0.4);
+  stroke: rgba(150, 90, 255, 0.7);
+  stroke-width: 1;
+  cursor: grab;
+  transition: fill 120ms ease;
+}
+
+.curve-point:hover {
+  fill: rgba(150, 90, 255, 0.65);
+}
+
+.curve-point:active {
+  cursor: grabbing;
+  fill: rgba(150, 90, 255, 0.8);
+}
+
+.curve-point:focus-visible {
+  outline: none; /* box outline looks wrong on a circle — brighten the ring */
+  stroke: rgba(150, 90, 255, 0.95);
+  stroke-width: 2;
+}
+
+.curve-live-line {
+  stroke: rgba(255, 255, 255, 0.12);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+/* The one charged accent (cf. .wordmark-dot) */
+.curve-live-dot {
+  fill: rgba(150, 90, 255, 0.95);
+  filter:
+    drop-shadow(0 0 4px rgba(120, 60, 255, 0.9))
+    drop-shadow(0 0 10px rgba(80, 20, 220, 0.5));
+}
+
+.curve-live-label {
+  fill: var(--text-dim);
+  font-family: var(--font);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}

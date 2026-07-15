@@ -67,10 +67,10 @@
 
 ### Task D2: curve editor component
 
-- [ ] `ui/src/lib/components/CurveEditor.tsx` + framework-free `curveModel.ts`: points (temp°C x, duty% y) on an SVG grid; drag to move (pointer events), click-empty to add, double-click point to remove (min 2 points); monotonic temp enforcement (clamp/x-order), y clamp 0–100. Live temp cursor: vertical line + current interpolated duty highlight, fed from Status `curves[].sensor_c`.
-- [ ] Rust `curve.rs` is ground truth for interpolation semantics — mirror it EXACTLY in `curveModel.ts` (read it; likely linear interp with edge clamping) and pin with vitest cases copied from the Rust tests' values.
-- [ ] Vitest: drag/add/remove invariants, interpolation parity vector.
-- [ ] Gates green. Commit: `feat(ui): curve editor component`
+- [x] `ui/src/lib/components/CurveEditor.tsx` + framework-free `curveModel.ts`: points (temp°C x, duty% y) on an SVG grid; drag to move (pointer events), click-empty to add, double-click point to remove (min 2 points); monotonic temp enforcement (clamp/x-order), y clamp 0–100. Live temp cursor: vertical line + current interpolated duty highlight, fed from Status `curves[].sensor_c`.
+- [x] Rust `curve.rs` is ground truth for interpolation semantics — mirror it EXACTLY in `curveModel.ts` (read it; likely linear interp with edge clamping) and pin with vitest cases copied from the Rust tests' values.
+- [x] Vitest: drag/add/remove invariants, interpolation parity vector (15 tests; SortedCurve::eval mirrored exactly incl. epsilon guard; model speaks duty %, PWM only at the wire).
+- [x] Gates green. Commit: `feat(ui): curve editor component`
 
 ### Task D3: Cooling screen
 
