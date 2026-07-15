@@ -60,10 +60,10 @@
 
 ### Task D1: sensors IPC (daemon)
 
-- [ ] `Request::ListSensors` → enumerate hwmon (`/sys/class/hwmon/hwmon*/temp*_input` + labels + chip names), reply `{sensors: [{chip, label, path_spec, current_c}]}` shaped to be directly usable as config `SensorSpec` references (reuse `sensors.rs` resolve logic in reverse; read each current temp best-effort).
-- [ ] Extend `StatusData` with per-curve current temp: `curves: [{name, sensor_c: f32|null}]` (cheap — supervisor already reads them for control; expose the last EMA'd value). Keep envelope v1 (additive field).
-- [ ] Tests: fake hwmon tree fixture (tempdir) → enumeration + shapes; Status extension in existing sim tests.
-- [ ] Gates: daemon tests + clippy. Commit: `feat(daemon): ListSensors IPC + curve temps in Status`
+- [x] `Request::ListSensors` → enumerate hwmon (`/sys/class/hwmon/hwmon*/temp*_input` + labels + chip names), reply `{sensors: [{chip, label, path_spec, current_c}]}` shaped to be directly usable as config `SensorSpec` references (reuse `sensors.rs` resolve logic in reverse; read each current temp best-effort).
+- [x] Extend `StatusData` with per-curve current temp: `curves: [{name, sensor_c: f32|null}]` (cheap — supervisor already reads them for control; expose the last EMA'd value). Keep envelope v1 (additive field).
+- [x] Tests: fake hwmon tree fixture (tempdir) → enumeration + shapes; Status extension in existing sim tests.
+- [x] Gates: daemon tests + clippy (104 daemon tests). **History note:** D1's changes were accidentally swept into UI commits `47f62d9`/`9db97b2` by coordinator `git add -A` while agents ran in parallel — content verified identical to the implementer's final tested state; no separate feat(daemon) commit exists. Coordinator process fixed: path-scoped adds only. SensorSpec is chip-name+input based; ListSensors emits verbatim-usable specs; Status.curves uses the control-path EMA values (no new polling).
 
 ### Task D2: curve editor component
 
