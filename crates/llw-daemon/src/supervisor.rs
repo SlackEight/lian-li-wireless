@@ -307,8 +307,15 @@ impl<T: UsbIo> Supervisor<T> {
                 // Reset per-device state BEFORE ingesting the acquisition
                 // record: a carried dropout streak would otherwise emit one
                 // spurious observation from the acquisition record itself.
+                //
+                // `expected_fx` is deliberately KEPT: the drift guard compares
+                // it against the fresh record's effect index, so an intact
+                // onboard animation survives re-acquisition without a
+                // re-upload (each upload is a device flash write — Tier-1
+                // storms under RF interference burned hundreds of them,
+                // 2026-07-17). Config changes still force re-assert via the
+                // SetEffect/SetColor/apply_config invalidation paths.
                 for d in self.devices.values_mut() {
-                    d.expected_fx = None;
                     d.last_sent = None;
                     d.filter = DropoutFilter::default();
                 }
@@ -1366,6 +1373,51 @@ mod tests {
         assert!(tier1_fired, "sustained readback loss must trigger Tier 1");
         // after the tier-1 resync consumed a read, link should be back
         assert!(sup.link().is_some());
+    }
+
+    #[test]
+    fn tier1_does_not_reupload_intact_rgb() {
+        // The 2026-07-17 interference incident: sustained PWM-readback zeros
+        // trip Tier 1 while the onboard RGB state stays INTACT (the record's
+        // effect index still matches what we uploaded). The re-acquire must
+        // NOT re-upload RGB — every needless upload is a device flash write,
+        // and interference storms fired 244 of them in a day.
+        use llw_protocol::record::parse_device_record;
+
+        // The index the first upload will produce for test_config's white.
+        let parsed = parse_device_record(&record_bytes([102, 102, 102, 0], [0; 4]), 0).unwrap();
+        let idx = rgb_assert::expected_index(&rgb_assert::static_frame(
+            &parsed,
+            &StaticColor { rgb: [255, 255, 255], brightness: 4 },
+        ));
+
+        let fresh = record_bytes([102, 102, 102, 0], [0; 4]); // pre-upload fx
+        let healthy = record_bytes([102, 102, 102, 0], idx);
+        let dropped = record_bytes([0, 0, 0, 0], idx); // PWM zeroed, RGB intact
+
+        // acquire(fresh) → first poll uploads → healthy polls (past the 5s
+        // re-upload cooldown, so cooldown can't mask a wrong re-upload) →
+        // sustained zeros → Tier 1 re-acquire read → recovery polls.
+        let mut script = vec![getdev_resp(&[fresh]); 2];
+        script.extend(vec![getdev_resp(&[healthy]); 4]);
+        script.extend(vec![getdev_resp(&[dropped]); 6]);
+        script.extend(vec![getdev_resp(&[healthy]); 6]);
+        let (mut sup, t0) = sim(fast_reliability_config(), script);
+
+        let mut uploads = 0;
+        let mut tier1s = 0;
+        for i in 0..17 {
+            let out = sup.step(t0 + Duration::from_secs(i + 1));
+            uploads += out.uploaded_rgb;
+            if out.tier1 {
+                tier1s += 1;
+            }
+        }
+        assert!(tier1s >= 1, "scenario must reach Tier 1");
+        assert_eq!(
+            uploads, 1,
+            "intact RGB must not be re-uploaded after Tier 1 (flash wear)"
+        );
     }
 
     #[test]
