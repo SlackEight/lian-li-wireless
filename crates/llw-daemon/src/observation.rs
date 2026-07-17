@@ -37,10 +37,20 @@ pub struct Surge {
     pub baseline_rpm: u16,
 }
 
-/// How many post-recovery polls the tracker keeps peaking before judging.
+/// Post-recovery tail duration the tracker keeps peaking before judging.
 /// The 2026-07-17 4Hz captures show the physical peak lands ~3s AFTER
-/// readback recovers (fan inertia) and decays within ~5s; 8 one-second polls
-/// cover it with margin.
+/// readback recovers (fan inertia) and decays within ~5s; 8 seconds covers
+/// it with margin. Callers convert to polls via their poll cadence
+/// ([`tail_polls_for`]); tests use TEST_TAIL_POLLS directly.
+pub const SURGE_TAIL_MS: u64 = 8_000;
+
+/// The tail in polls for a given poll cadence (minimum 4 so a slow cadence
+/// still observes some tail).
+pub fn tail_polls_for(poll_ms: u64) -> u8 {
+    (SURGE_TAIL_MS / poll_ms.max(1)).clamp(4, 120) as u8
+}
+
+#[cfg(test)]
 pub const SURGE_TAIL_POLLS: u8 = 8;
 
 /// Peak ≥ ⅓ + 100 rpm above baseline = surge. Wide enough to ignore wobble
@@ -75,8 +85,15 @@ pub struct SurgeTracker {
 
 impl SurgeTracker {
     /// `commanded`/`readback_zero` as in [`DropoutFilter::observe`];
-    /// `max_rpm` = the record's highest active-fan RPM this poll.
-    pub fn observe(&mut self, commanded: bool, readback_zero: bool, max_rpm: u16) -> Option<Surge> {
+    /// `max_rpm` = the record's highest active-fan RPM this poll;
+    /// `tail_polls` = [`tail_polls_for`] the caller's poll cadence.
+    pub fn observe(
+        &mut self,
+        commanded: bool,
+        readback_zero: bool,
+        max_rpm: u16,
+        tail_polls: u8,
+    ) -> Option<Surge> {
         let in_window = commanded && readback_zero;
         match &mut self.phase {
             SurgePhase::Idle => {
@@ -92,7 +109,7 @@ impl SurgeTracker {
                 self.phase = if in_window {
                     SurgePhase::InWindow { peak }
                 } else {
-                    SurgePhase::Tail { peak, polls_left: SURGE_TAIL_POLLS }
+                    SurgePhase::Tail { peak, polls_left: tail_polls }
                 };
                 None
             }
@@ -182,45 +199,45 @@ mod tests {
         // The 2026-07-17 signature: rpm is still low while readback is
         // zeroed; the physical peak arrives AFTER recovery (fan inertia).
         let mut t = SurgeTracker::default();
-        assert_eq!(t.observe(true, false, 730), None); // baseline
-        assert_eq!(t.observe(true, true, 725), None); // window opens, rpm low
-        assert_eq!(t.observe(true, true, 728), None);
-        assert_eq!(t.observe(true, false, 1567), None); // recovered; tail begins
-        assert_eq!(t.observe(true, false, 1900), None); // inertia peak
+        assert_eq!(t.observe(true, false, 730, SURGE_TAIL_POLLS), None); // baseline
+        assert_eq!(t.observe(true, true, 725, SURGE_TAIL_POLLS), None); // window opens, rpm low
+        assert_eq!(t.observe(true, true, 728, SURGE_TAIL_POLLS), None);
+        assert_eq!(t.observe(true, false, 1567, SURGE_TAIL_POLLS), None); // recovered; tail begins
+        assert_eq!(t.observe(true, false, 1900, SURGE_TAIL_POLLS), None); // inertia peak
         for _ in 0..(SURGE_TAIL_POLLS - 2) {
-            assert_eq!(t.observe(true, false, 900), None);
+            assert_eq!(t.observe(true, false, 900, SURGE_TAIL_POLLS), None);
         }
-        let surge = t.observe(true, false, 760).expect("tail end must judge");
+        let surge = t.observe(true, false, 760, SURGE_TAIL_POLLS).expect("tail end must judge");
         assert_eq!(surge, Surge { peak_rpm: 1900, baseline_rpm: 730 });
         // fresh baseline after the episode
-        assert_eq!(t.observe(true, false, 735), None);
-        assert_eq!(t.observe(true, true, 730), None);
+        assert_eq!(t.observe(true, false, 735, SURGE_TAIL_POLLS), None);
+        assert_eq!(t.observe(true, true, 730, SURGE_TAIL_POLLS), None);
     }
 
     #[test]
     fn quiet_window_is_not_a_surge() {
         let mut t = SurgeTracker::default();
-        t.observe(true, false, 730);
-        t.observe(true, true, 735);
-        t.observe(true, true, 871); // wobble
-        t.observe(true, false, 736);
+        t.observe(true, false, 730, SURGE_TAIL_POLLS);
+        t.observe(true, true, 735, SURGE_TAIL_POLLS);
+        t.observe(true, true, 871, SURGE_TAIL_POLLS); // wobble
+        t.observe(true, false, 736, SURGE_TAIL_POLLS);
         for _ in 0..(SURGE_TAIL_POLLS - 1) {
-            assert_eq!(t.observe(true, false, 733), None);
+            assert_eq!(t.observe(true, false, 733, SURGE_TAIL_POLLS), None);
         }
-        assert_eq!(t.observe(true, false, 731), None, "871 vs 730 is wobble");
+        assert_eq!(t.observe(true, false, 731, SURGE_TAIL_POLLS), None, "871 vs 730 is wobble");
     }
 
     #[test]
     fn reopened_window_merges_into_one_episode() {
         let mut t = SurgeTracker::default();
-        t.observe(true, false, 730);
-        t.observe(true, true, 725);
-        t.observe(true, false, 1500); // tail
-        t.observe(true, true, 1800); // struck again mid-tail — merge
-        t.observe(true, false, 2000); // tail restarts
+        t.observe(true, false, 730, SURGE_TAIL_POLLS);
+        t.observe(true, true, 725, SURGE_TAIL_POLLS);
+        t.observe(true, false, 1500, SURGE_TAIL_POLLS); // tail
+        t.observe(true, true, 1800, SURGE_TAIL_POLLS); // struck again mid-tail — merge
+        t.observe(true, false, 2000, SURGE_TAIL_POLLS); // tail restarts
         let mut result = None;
         for _ in 0..SURGE_TAIL_POLLS {
-            result = t.observe(true, false, 800);
+            result = t.observe(true, false, 800, SURGE_TAIL_POLLS);
             if result.is_some() {
                 break;
             }
@@ -233,12 +250,12 @@ mod tests {
     #[test]
     fn reset_aborts_the_episode() {
         let mut t = SurgeTracker::default();
-        t.observe(true, false, 730);
-        t.observe(true, true, 725);
-        t.observe(true, false, 2000); // would be a surge...
+        t.observe(true, false, 730, SURGE_TAIL_POLLS);
+        t.observe(true, true, 725, SURGE_TAIL_POLLS);
+        t.observe(true, false, 2000, SURGE_TAIL_POLLS); // would be a surge...
         t.reset(); // ...but the commanded PWM changed (curve move)
         for _ in 0..=SURGE_TAIL_POLLS {
-            assert_eq!(t.observe(true, false, 2000), None);
+            assert_eq!(t.observe(true, false, 2000, SURGE_TAIL_POLLS), None);
         }
     }
 }

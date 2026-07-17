@@ -1787,3 +1787,16 @@ Owner: "it is still doing it" — correct, and 4Hz captures explain why the 1Hz 
 - keepalive_ms set to 250 in the live config (shipped default stays 1000): trims up to ~750ms off each surge's full-speed command window.
 
 Validation loop: watch `journalctl --user -u llw-daemon | grep 'fan surge'` and the Health counter against the owner's ears. Remaining mitigation ideas if the rate stays painful: physical (TX dongle placement nearer the master raises our signal margin over the interferer), and identifying the interferer (its schedule suggests a neighbor's rig — powering our master cluster off/on during a quiet hour would re-roll nothing, but asking neighbors about Lian Li gear might).
+
+### Incident final root cause — firmware revert-on-keepalive-loss under RF noise (2026-07-17 evening)
+
+Channel survey: OUR master is the ONLY Lian Li device answering on all 39 channels — no foreign controller exists. The "external transmitter" theory is dead. The real mechanism, confirmed by a daemon-silent capture (revert window persisted 15+ s at full 2190 rpm with no keepalives flowing) and our own code comment ("firmware reverts without traffic"): **2.4 GHz noise (WiFi, hour-of-day) kills our TX→master keepalive frames; after ~10-15 s without one, the master's host-lost failsafe reverts PWM to hardware default (full)**. The master→us direction (GetDev records via the RX dongle) rides through the same noise — the case-internal TX dongle next to a 575 W GPU is the weak link. This also retro-explains June and "ch2 good / ch8 bad" (WiFi overlap).
+
+Burst-recovery probe: master accepts a correct frame in 0.3-1.2 s of 30 ms-spaced attempts (3-12 frames) — no deafness; earlier "ignored frames" were probe frames carrying a wrong rf[15]. Fixes shipped (validated by the surge watchdog's peak numbers):
+1. **Burst-on-revert**: readback all-zero while commanded → the PWM frame is sent ×4 at 25 ms per tick (single frames die to the same noise that caused the revert). Pinned by `reverted_readback_sends_a_pwm_burst`.
+2. **Detection at 4 Hz**: observation.poll_ms 1000→250 live (revert detected in ≤350 ms instead of ≤1.2 s).
+3. **True 200 ms keepalive**: port-fidelity audit found keepalive_ms=250 vs tick_ms=200 quantizes to ~400 ms sends; keepalive_ms=200 restores upstream's effective 200-300 ms cadence.
+4. **rf[16] seq parity (audit CRITICAL)**: we sent raw-GetDev-slot+1; upstream sends the 1-based position filtered to our master's devices. Wrong/flapping seq is a plausible silent-rejection mechanism under contention. Now derived per upstream at ingest.
+5. Surge watchdog tail made time-based (8 s regardless of poll cadence).
+
+Remaining levers, owner decision: (a) move the TX dongle out of the case (front/top USB or short extension — raises TX→master margin over the noise; likely the single biggest physical win); (b) re-bind the cluster with a chosen master_channel (bind frames carry rf[15]; June's quiet ch2 suggests channel is chosen at pair time — would move us off the noisy frequency permanently; needs owner present, uses the M4a bind machinery, doubles as its live validation); (c) 2.4 GHz hygiene on their own router (it broadcasts on WiFi ch10).

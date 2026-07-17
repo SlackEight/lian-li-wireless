@@ -42,6 +42,11 @@ const RGB_SETTLE: Duration = Duration::from_secs(3);
 /// Surge notifications at most this often (journal WARNs are unthrottled).
 const SURGE_NOTIFY_COOLDOWN: Duration = Duration::from_secs(60);
 
+/// PWM frames per send while the master is REVERTED (readback all-zero,
+/// commanded nonzero) — repetition beats the RF noise that caused the revert.
+const REVERT_BURST_REPEATS: usize = 4;
+const REVERT_BURST_GAP: Duration = Duration::from_millis(25);
+
 /// Failsafe engages when a sensor has been unreadable this long — or immediately if it has never produced a reading.
 const SENSOR_FAILSAFE_AFTER: Duration = Duration::from_secs(60);
 
@@ -119,6 +124,11 @@ struct DeviceRuntime {
     /// Surge watchdog (2026-07-17 incident): judges zero-readback windows
     /// plus the fan-inertia tail against the healthy RPM baseline.
     surge: crate::observation::SurgeTracker,
+    /// rf[16] for PWM commands: 1-based position of this device among OUR
+    /// master's devices in the latest GetDev report (upstream fan_speed.rs
+    /// semantics — the raw GetDev slot index is WRONG when foreign/master
+    /// records occupy earlier slots; port-fidelity audit 2026-07-17).
+    seq_index: u8,
 }
 
 pub struct Supervisor<T: UsbIo> {
@@ -382,6 +392,14 @@ impl<T: UsbIo> Supervisor<T> {
 
             // Configured-device flow: unchanged.
             let Some(dev) = self.devices.get_mut(&rec.mac) else { continue };
+            if let Some(ours) = our_master.as_ref() {
+                dev.seq_index = records
+                    .iter()
+                    .filter(|r| &r.master_mac == ours && r.device_type != 0xFF)
+                    .position(|r| r.mac == rec.mac)
+                    .map(|i| (i + 1) as u8)
+                    .unwrap_or(1);
+            }
             let commanded = dev
                 .desired
                 .iter()
@@ -408,7 +426,14 @@ impl<T: UsbIo> Supervisor<T> {
                 .copied()
                 .max()
                 .unwrap_or(0);
-            if let Some(surge) = dev.surge.observe(commanded, readback_zero, max_rpm) {
+            // poll_ms 0 = unthrottled (test convention) — use the 1s default
+            // for tail sizing so sims and slow configs agree.
+            let poll_ms = match self.cfg.observation.poll_ms {
+                0 => 1000,
+                ms => ms,
+            };
+            let tail = crate::observation::tail_polls_for(poll_ms);
+            if let Some(surge) = dev.surge.observe(commanded, readback_zero, max_rpm, tail) {
                 surges.push((rec.mac_str(), surge));
             }
 
@@ -510,21 +535,40 @@ impl<T: UsbIo> Supervisor<T> {
                     &link.master_mac,
                     rec.rx_type,
                     link.channel,
-                    rec.list_index + 1,
+                    dev.seq_index,
                     &pwm,
                 );
+                // Firmware-revert recovery (2026-07-17): when the master has
+                // reverted (readback all-zero while commanded), single frames
+                // die to the same RF noise that caused the revert — burst-
+                // repeat so one lands (burst-recovery probe: 3-12 frames at
+                // 30ms recovered in 0.3-1.2s; single-per-tick took 2-4s of
+                // full-speed fans).
+                let reverted = pwm.iter().take(rec.fan_count as usize).any(|&p| p > 0)
+                    && rec
+                        .current_pwm
+                        .iter()
+                        .take(rec.fan_count as usize)
+                        .all(|&p| p == 0);
+                let repeats = if reverted { REVERT_BURST_REPEATS } else { 1 };
                 let Some(dongle) = self.dongle.as_mut() else { return sent };
-                match dongle.send_rf_frame(&rf, rec.channel, rec.rx_type) {
-                    Ok(()) => {
-                        dev.last_sent = Some(now);
-                        sent += 1;
-                    }
-                    Err(e) => {
+                let mut failed = false;
+                for i in 0..repeats {
+                    if let Err(e) = dongle.send_rf_frame(&rf, rec.channel, rec.rx_type) {
                         warn!("PWM send failed for {}: {e}", rec.mac_str());
-                        self.drop_dongle();
-                        return sent;
+                        failed = true;
+                        break;
+                    }
+                    if i + 1 < repeats {
+                        std::thread::sleep(REVERT_BURST_GAP);
                     }
                 }
+                if failed {
+                    self.drop_dongle();
+                    return sent;
+                }
+                dev.last_sent = Some(now);
+                sent += 1;
             }
         }
         sent
@@ -1038,6 +1082,7 @@ impl<T: UsbIo> Supervisor<T> {
                         last_rgb_upload: None,
                         last_record: None,
                         surge: Default::default(),
+                        seq_index: 1,
                     },
                 );
                 info!("bind complete for {mac_str}");
@@ -1146,6 +1191,7 @@ fn build_runtimes(cfg: &Config) -> (HashMap<String, CurveRuntime>, HashMap<[u8; 
                     last_rgb_upload: None,
                     last_record: None,
                     surge: Default::default(),
+                    seq_index: 1,
                 },
             );
         }
@@ -1453,6 +1499,58 @@ mod tests {
         assert!(tier1_fired, "sustained readback loss must trigger Tier 1");
         // after the tier-1 resync consumed a read, link should be back
         assert!(sup.link().is_some());
+    }
+
+    #[test]
+    fn reverted_readback_sends_a_pwm_burst() {
+        // Firmware-revert recovery: a zero-readback record must trigger a
+        // REVERT_BURST_REPEATS burst of the SAME pwm frame (RF-noise beating),
+        // while healthy keepalives stay single-frame.
+        fn pwm_frames(writes: &[Vec<u8>]) -> usize {
+            writes
+                .iter()
+                .filter(|w| w.len() == 64 && w[0] == 0x10 && w[1] == 0 && w[4] == 0x12 && w[5] == 0x10)
+                .count()
+        }
+
+        let mut cfg = test_config();
+        cfg.devices[0].color = None;
+        cfg.observation.poll_ms = 0;
+        cfg.control.tick_ms = 0;
+        cfg.control.keepalive_ms = 0; // keepalive every step
+
+        let healthy = record_bytes([102, 102, 102, 0], [0; 4]);
+        let dropped = record_bytes([0, 0, 0, 0], [0; 4]);
+        let mut script = vec![getdev_resp(&[healthy]); 3];
+        script.push(getdev_resp(&[dropped]));
+        script.extend(vec![getdev_resp(&[healthy]); 2]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut sup, _ipc, tx, t0) =
+            sim_with_ipc_shared_tx(cfg, script, dir.path().join("config.json"));
+
+        let mut per_step = Vec::new();
+        let mut prev = 0;
+        for i in 0..6 {
+            let _ = sup.step(t0 + Duration::from_secs(i + 1));
+            let total = pwm_frames(&tx.written());
+            per_step.push(total - prev);
+            prev = total;
+        }
+        // Steps polling healthy records send exactly one frame; the step that
+        // ingests the zeroed record bursts REVERT_BURST_REPEATS frames.
+        assert!(
+            per_step.contains(&REVERT_BURST_REPEATS),
+            "expected one burst of {REVERT_BURST_REPEATS}, per-step sends: {per_step:?}"
+        );
+        assert!(
+            per_step.iter().filter(|&&n| n == 1).count() >= 3,
+            "healthy keepalives must stay single-frame, per-step sends: {per_step:?}"
+        );
+        assert!(
+            !per_step.iter().any(|&n| n != 0 && n != 1 && n != REVERT_BURST_REPEATS),
+            "no other send multiplicities expected: {per_step:?}"
+        );
     }
 
     #[test]
