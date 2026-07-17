@@ -47,6 +47,14 @@ pub struct Telemetry {
     pub total_tier1: u64,
     pub total_tier2: u64,
     pub failed_tier1_streak: u32,
+    /// Zero-readback windows whose fan RPM ramped well above the healthy
+    /// baseline — the user-audible surge the watchdog exists to catch
+    /// (2026-07-17 interference incident). Additive fields: absent in
+    /// pre-watchdog daemons.
+    #[serde(default)]
+    pub total_surges: u64,
+    #[serde(default)]
+    pub last_surge_peak_rpm: u16,
 }
 
 #[derive(Debug)]
@@ -60,6 +68,8 @@ pub struct Reliability {
     total_dropouts: u64,
     total_tier1: u64,
     total_tier2: u64,
+    total_surges: u64,
+    last_surge_peak_rpm: u16,
 }
 
 /// Durations precomputed from the serializable config.
@@ -92,6 +102,8 @@ impl Reliability {
             total_dropouts: 0,
             total_tier1: 0,
             total_tier2: 0,
+            total_surges: 0,
+            last_surge_peak_rpm: 0,
         }
     }
 
@@ -102,6 +114,13 @@ impl Reliability {
         self.acquired_at = Some(now);
         self.dropouts.clear();
         self.failed_tier1_streak = 0;
+    }
+
+    /// Record one surge: a zero-readback window whose peak RPM ran away from
+    /// the healthy baseline (fans audibly spun up).
+    pub fn on_surge(&mut self, peak_rpm: u16) {
+        self.total_surges += 1;
+        self.last_surge_peak_rpm = peak_rpm;
     }
 
     /// Record one dropout observation (commanded PWM present, readback all-zero).
@@ -177,6 +196,8 @@ impl Reliability {
             total_tier1: self.total_tier1,
             total_tier2: self.total_tier2,
             failed_tier1_streak: self.failed_tier1_streak,
+            total_surges: self.total_surges,
+            last_surge_peak_rpm: self.last_surge_peak_rpm,
         }
     }
 

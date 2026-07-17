@@ -61,6 +61,21 @@ function ReliabilityCard({ reliability }: { reliability: Telemetry }) {
           <span className="stat-value">{reliability.failed_tier1_streak}</span>
           <span className="stat-label">failed streak</span>
         </div>
+        <div className="stat">
+          <span
+            className={
+              (reliability.total_surges ?? 0) > 0 ? 'stat-value stat-warn' : 'stat-value'
+            }
+            title={
+              reliability.last_surge_peak_rpm
+                ? `last peak ${reliability.last_surge_peak_rpm} rpm`
+                : undefined
+            }
+          >
+            {reliability.total_surges ?? 0}
+          </span>
+          <span className="stat-label">fan surges</span>
+        </div>
       </div>
     </div>
   );

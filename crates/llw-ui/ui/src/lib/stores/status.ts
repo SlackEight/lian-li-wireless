@@ -33,6 +33,9 @@ export interface Telemetry {
   total_tier1: number;
   total_tier2: number;
   failed_tier1_streak: number;
+  /** Fan-surge watchdog (additive fields — absent on pre-watchdog daemons). */
+  total_surges?: number;
+  last_surge_peak_rpm?: number;
 }
 
 export interface DeviceStatus {

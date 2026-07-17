@@ -38,6 +38,10 @@ const RGB_REUPLOAD_COOLDOWN: Duration = Duration::from_secs(5);
 /// changes are rare and user-initiated; the alternative (animations never
 /// sticking) is worse.
 const RGB_SETTLE: Duration = Duration::from_secs(3);
+
+/// Surge notifications at most this often (journal WARNs are unthrottled).
+const SURGE_NOTIFY_COOLDOWN: Duration = Duration::from_secs(60);
+
 /// Failsafe engages when a sensor has been unreadable this long — or immediately if it has never produced a reading.
 const SENSOR_FAILSAFE_AFTER: Duration = Duration::from_secs(60);
 
@@ -112,6 +116,9 @@ struct DeviceRuntime {
     expected_fx: Option<[u8; 4]>,
     last_rgb_upload: Option<Instant>,
     last_record: Option<DeviceRecord>,
+    /// Surge watchdog (2026-07-17 incident): judges zero-readback windows
+    /// plus the fan-inertia tail against the healthy RPM baseline.
+    surge: crate::observation::SurgeTracker,
 }
 
 pub struct Supervisor<T: UsbIo> {
@@ -133,6 +140,8 @@ pub struct Supervisor<T: UsbIo> {
     /// send_heartbeat are skipped until this instant passes, giving the
     /// firmware's flash-commit window the RF silence it needs.
     rf_settle_until: Option<Instant>,
+    /// Rate limit for surge desktop notifications.
+    last_surge_notify: Option<Instant>,
     pub tx_wedged: bool,
     /// Air inventory: every device seen on the air, keyed by MAC. Entries
     /// are updated on every ingest and pruned after 30s of silence.
@@ -167,6 +176,7 @@ impl<T: UsbIo> Supervisor<T> {
             last_fan_tick: None,
             last_heartbeat: None,
             rf_settle_until: None,
+            last_surge_notify: None,
             tx_wedged: false,
             air: HashMap::new(),
             pending_op: None,
@@ -352,6 +362,8 @@ impl<T: UsbIo> Supervisor<T> {
         let threshold = self.cfg.observation.consecutive_polls;
         // Classify bond based on the link we hold (if any).
         let our_master = self.link.map(|l| l.master_mac);
+        // Surges judged this ingest: (mac string, judged surge).
+        let mut surges: Vec<(String, crate::observation::Surge)> = Vec::new();
         for rec in records {
             // Update air inventory for EVERY record, regardless of config.
             let bond = classify_bond(rec, our_master.as_ref());
@@ -385,7 +397,36 @@ impl<T: UsbIo> Supervisor<T> {
                 debug!("dropout observation for {} (streak {})", rec.mac_str(), dev.filter.streak());
                 self.reliability.on_dropout(now);
             }
+
+            // Surge watchdog: the physical peak arrives AFTER readback
+            // recovers (fan inertia — 4Hz captures, 2026-07-17), so the
+            // tracker judges the window plus a post-recovery tail.
+            let max_rpm = rec
+                .fan_rpms
+                .iter()
+                .take(rec.fan_count as usize)
+                .copied()
+                .max()
+                .unwrap_or(0);
+            if let Some(surge) = dev.surge.observe(commanded, readback_zero, max_rpm) {
+                surges.push((rec.mac_str(), surge));
+            }
+
             dev.last_record = Some(rec.clone());
+        }
+        for (mac, surge) in surges {
+            warn!(
+                "fan surge on {mac}: peak {} rpm (baseline {}) across a dropout window + inertia tail",
+                surge.peak_rpm, surge.baseline_rpm
+            );
+            self.reliability.on_surge(surge.peak_rpm);
+            let due = self
+                .last_surge_notify
+                .is_none_or(|t| now.duration_since(t) >= SURGE_NOTIFY_COOLDOWN);
+            if due {
+                self.last_surge_notify = Some(now);
+                notify_surge(surge.peak_rpm, surge.baseline_rpm);
+            }
         }
     }
 
@@ -452,6 +493,16 @@ impl<T: UsbIo> Supervisor<T> {
             }
             let mut pwm = fan::resolve_slots(dc, &curve_pct);
             apply_pwm_constraints(&mut pwm, rec.kind, rec.fan_count);
+            // A material commanded-speed change makes RPM movement legitimate;
+            // abort any in-flight surge episode (tracker caller contract).
+            if dev
+                .desired
+                .iter()
+                .zip(pwm.iter())
+                .any(|(a, b)| a.abs_diff(*b) > 10)
+            {
+                dev.surge.reset();
+            }
             dev.desired = pwm;
             if fan::should_send(&pwm, &rec.current_pwm, dev.last_sent, now, keepalive) {
                 let rf = pwm_frame(
@@ -601,6 +652,11 @@ impl<T: UsbIo> Supervisor<T> {
     #[allow(dead_code)] // future-facing: used in supervisor tests; llw status will call via IPC, not directly
     pub fn link(&self) -> Option<Link> {
         self.link
+    }
+
+    #[cfg(test)]
+    pub(crate) fn telemetry(&self) -> crate::reliability::Telemetry {
+        self.reliability.telemetry()
     }
 
     fn drain_ipc(&mut self, _now: Instant) {
@@ -981,6 +1037,7 @@ impl<T: UsbIo> Supervisor<T> {
                         expected_fx: None,
                         last_rgb_upload: None,
                         last_record: None,
+                        surge: Default::default(),
                     },
                 );
                 info!("bind complete for {mac_str}");
@@ -1088,6 +1145,7 @@ fn build_runtimes(cfg: &Config) -> (HashMap<String, CurveRuntime>, HashMap<[u8; 
                     expected_fx: None,
                     last_rgb_upload: None,
                     last_record: None,
+                    surge: Default::default(),
                 },
             );
         }
@@ -1104,6 +1162,19 @@ fn mac_str(mac: &[u8; 6]) -> String {
 
 fn due(last: Option<Instant>, now: Instant, interval: Duration) -> bool {
     last.is_none_or(|t| now.duration_since(t) >= interval)
+}
+
+/// Desktop notification for a detected fan surge (rate-limited by caller).
+fn notify_surge(peak: u16, baseline: u16) {
+    let child = std::process::Command::new("notify-send")
+        .arg("llw-daemon")
+        .arg(format!("fan surge detected: peak {peak} rpm (baseline {baseline})"))
+        .spawn();
+    if let Ok(mut c) = child {
+        std::thread::spawn(move || {
+            let _ = c.wait();
+        });
+    }
 }
 
 /// Fires once per wedge EPISODE (re-wedge after recovery re-notifies).
@@ -1139,6 +1210,15 @@ mod tests {
         r[24] = 36;
         r[36..40].copy_from_slice(&pwm);
         r[41] = 0x1C;
+        r
+    }
+
+    /// record_bytes plus explicit fan RPMs (big-endian u16 at r[28 + i*2]).
+    pub(crate) fn record_bytes_rpm(pwm: [u8; 4], fx: [u8; 4], rpms: [u16; 4]) -> [u8; 42] {
+        let mut r = record_bytes(pwm, fx);
+        for (i, rpm) in rpms.iter().enumerate() {
+            r[28 + i * 2..30 + i * 2].copy_from_slice(&rpm.to_be_bytes());
+        }
         r
     }
 
@@ -1373,6 +1453,57 @@ mod tests {
         assert!(tier1_fired, "sustained readback loss must trigger Tier 1");
         // after the tier-1 resync consumed a read, link should be back
         assert!(sup.link().is_some());
+    }
+
+    #[test]
+    fn surging_dropout_window_is_counted() {
+        // The audible failure mode: readback zeroes and RPM ramps toward full
+        // while the window lasts. Closing the window must count ONE surge and
+        // report the peak.
+        let mut cfg = test_config();
+        cfg.devices[0].color = None; // no RGB path — keep the script simple
+        cfg.observation.poll_ms = 0;
+        cfg.control.tick_ms = 0;
+
+        // rpm stays LOW during the window; the peak lands in the tail
+        // (fan inertia — the real 4Hz capture shape).
+        let healthy = record_bytes_rpm([102, 102, 102, 0], [0; 4], [730, 728, 733, 0]);
+        let dropped = record_bytes_rpm([0, 0, 0, 0], [0; 4], [728, 726, 731, 0]);
+        let inertia = record_bytes_rpm([102, 102, 102, 0], [0; 4], [1879, 1906, 1871, 0]);
+        let mut script = vec![getdev_resp(&[healthy]); 2];
+        script.extend(vec![getdev_resp(&[dropped]); 2]);
+        script.push(getdev_resp(&[inertia]));
+        script.extend(vec![getdev_resp(&[healthy]); 10]);
+        let (mut sup, t0) = sim(cfg, script);
+        for i in 0..15 {
+            let _ = sup.step(t0 + Duration::from_secs(i + 1));
+        }
+        let t = sup.telemetry();
+        assert_eq!(t.total_surges, 1, "one surging episode = one surge");
+        assert_eq!(t.last_surge_peak_rpm, 1906);
+    }
+
+    #[test]
+    fn quiet_dropout_window_is_not_a_surge() {
+        // Post-fix behavior: the flash default matches the commanded speed,
+        // so a zero-readback window holds RPM near baseline. No surge.
+        let mut cfg = test_config();
+        cfg.devices[0].color = None;
+        cfg.observation.poll_ms = 0;
+        cfg.control.tick_ms = 0;
+
+        let healthy = record_bytes_rpm([102, 102, 102, 0], [0; 4], [730, 728, 733, 0]);
+        let quiet_drop = record_bytes_rpm([0, 0, 0, 0], [0; 4], [735, 871, 736, 0]);
+        let mut script = vec![getdev_resp(&[healthy]); 2];
+        script.extend(vec![getdev_resp(&[quiet_drop]); 2]);
+        script.extend(vec![getdev_resp(&[healthy]); 10]);
+        let (mut sup, t0) = sim(cfg, script);
+        for i in 0..14 {
+            let _ = sup.step(t0 + Duration::from_secs(i + 1));
+        }
+        let t = sup.telemetry();
+        assert_eq!(t.total_surges, 0, "871 vs 730 baseline is wobble, not a surge");
+        assert!(t.total_dropouts >= 1, "the window still counts as dropout observations");
     }
 
     #[test]

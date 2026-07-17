@@ -1775,3 +1775,15 @@ Hypotheses tested and falsified (probe binaries kept as `llw-protocol/examples/`
 **Daemon fix (this commit):** `try_acquire_link` no longer nulls `expected_fx` — the drift guard now compares retained state against the fresh record's effect index, so Tier-1 re-acquires stop re-uploading intact RGB (each upload is a device flash write; the storm burned 244 in a day). Pinned by `tier1_does_not_reupload_intact_rgb`.
 
 Carried forward: (a) consider `llw save-defaults` CLI + daemon-side re-snapshot when cruising PWM changes materially (rate-limited hard — flash wear); (b) the bind flow already saves current PWM at bind time, so newly bound devices get sane defaults automatically; (c) if the interferer's traffic ever causes worse than cosmetic dropout ticks, the remaining lever is physical (dongle placement/shielding) — the channel is not movable.
+
+### Incident addendum — surge persists past the flash-default fix; surge watchdog shipped (2026-07-17)
+
+Owner: "it is still doing it" — correct, and 4Hz captures explain why the 1Hz telemetry looked clean: **the physical RPM peak lands ~3s AFTER readback recovers** (fan inertia) and the window itself now closes fast enough to slip under the persistence filter — so dropout counters stay flat while fans audibly surge to ~1900. The interference is evidently not just wiping state but **actively commanding full speed** during the master's deaf gap; a flash default cannot defend against an active command. Net effect of the earlier fix: surges are shorter and less frequent, not gone.
+
+**Shipped: daemon-native surge watchdog** (the lianli-watchdog idea, done properly):
+- `observation::SurgeTracker` (pure, unit-tested): judges each zero-readback window PLUS an 8-poll inertia tail against the healthy RPM baseline; threshold ⅓+100 rpm over baseline (871-wobble-proof, catches 1500+); re-opened windows merge into one episode; `reset()` on material commanded-PWM change so curve moves can't false-positive (wired in fan_tick).
+- Every judged surge: journal WARN with peak/baseline, `Telemetry.total_surges` + `last_surge_peak_rpm` (additive serde), desktop notify-send (60s rate limit) so the owner can correlate what they hear with hard timestamps.
+- UI Health reliability card shows "fan surges" (amber when nonzero, last peak in the tooltip).
+- keepalive_ms set to 250 in the live config (shipped default stays 1000): trims up to ~750ms off each surge's full-speed command window.
+
+Validation loop: watch `journalctl --user -u llw-daemon | grep 'fan surge'` and the Health counter against the owner's ears. Remaining mitigation ideas if the rate stays painful: physical (TX dongle placement nearer the master raises our signal margin over the interferer), and identifying the interferer (its schedule suggests a neighbor's rig — powering our master cluster off/on during a quiet hour would re-roll nothing, but asking neighbors about Lian Li gear might).
