@@ -55,6 +55,10 @@ pub struct Telemetry {
     pub total_surges: u64,
     #[serde(default)]
     pub last_surge_peak_rpm: u16,
+    /// Fan stalls: commanded-nonzero with every tach at 0 (2026-07-20
+    /// incident — the thermally dangerous failure shape).
+    #[serde(default)]
+    pub total_stalls: u64,
 }
 
 #[derive(Debug)]
@@ -70,6 +74,7 @@ pub struct Reliability {
     total_tier2: u64,
     total_surges: u64,
     last_surge_peak_rpm: u16,
+    total_stalls: u64,
 }
 
 /// Durations precomputed from the serializable config.
@@ -104,6 +109,7 @@ impl Reliability {
             total_tier2: 0,
             total_surges: 0,
             last_surge_peak_rpm: 0,
+            total_stalls: 0,
         }
     }
 
@@ -121,6 +127,11 @@ impl Reliability {
     pub fn on_surge(&mut self, peak_rpm: u16) {
         self.total_surges += 1;
         self.last_surge_peak_rpm = peak_rpm;
+    }
+
+    /// Record one confirmed fan stall (commanded, all tachs zero).
+    pub fn on_stall(&mut self) {
+        self.total_stalls += 1;
     }
 
     /// Record one dropout observation (commanded PWM present, readback all-zero).
@@ -198,6 +209,7 @@ impl Reliability {
             failed_tier1_streak: self.failed_tier1_streak,
             total_surges: self.total_surges,
             last_surge_peak_rpm: self.last_surge_peak_rpm,
+            total_stalls: self.total_stalls,
         }
     }
 

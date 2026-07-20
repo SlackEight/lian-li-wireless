@@ -76,6 +76,16 @@ function ReliabilityCard({ reliability }: { reliability: Telemetry }) {
           </span>
           <span className="stat-label">fan surges</span>
         </div>
+        <div className="stat">
+          <span
+            className={
+              (reliability.total_stalls ?? 0) > 0 ? 'stat-value stat-danger' : 'stat-value'
+            }
+          >
+            {reliability.total_stalls ?? 0}
+          </span>
+          <span className="stat-label">stalls</span>
+        </div>
       </div>
     </div>
   );

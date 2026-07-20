@@ -124,6 +124,9 @@ struct DeviceRuntime {
     /// Surge watchdog (2026-07-17 incident): judges zero-readback windows
     /// plus the fan-inertia tail against the healthy RPM baseline.
     surge: crate::observation::SurgeTracker,
+    /// Stall watchdog (2026-07-20 incident): commanded fans with all tachs
+    /// at zero — the thermally dangerous, previously invisible failure shape.
+    stall: crate::observation::StallTracker,
     /// rf[16] for PWM commands: 1-based position of this device among OUR
     /// master's devices in the latest GetDev report (upstream fan_speed.rs
     /// semantics — the raw GetDev slot index is WRONG when foreign/master
@@ -374,6 +377,8 @@ impl<T: UsbIo> Supervisor<T> {
         let our_master = self.link.map(|l| l.master_mac);
         // Surges judged this ingest: (mac string, judged surge).
         let mut surges: Vec<(String, crate::observation::Surge)> = Vec::new();
+        // Stall transitions this ingest: (mac string, Some(polls)=ended / None=started).
+        let mut stalls: Vec<(String, Option<u32>)> = Vec::new();
         for rec in records {
             // Update air inventory for EVERY record, regardless of config.
             let bond = classify_bond(rec, our_master.as_ref());
@@ -437,7 +442,34 @@ impl<T: UsbIo> Supervisor<T> {
                 surges.push((rec.mac_str(), surge));
             }
 
+            // Stall watchdog: commanded but every tach reads zero. Alarm the
+            // moment the stall is confirmed, and log its length when it ends.
+            let all_rpm_zero = rec.fan_count > 0
+                && rec
+                    .fan_rpms
+                    .iter()
+                    .take(rec.fan_count as usize)
+                    .all(|&r| r == 0);
+            let was_stalled = dev.stall.stalled();
+            if let Some(ended) = dev.stall.observe(commanded, all_rpm_zero) {
+                stalls.push((rec.mac_str(), Some(ended.polls)));
+            } else if !was_stalled && dev.stall.stalled() {
+                stalls.push((rec.mac_str(), None));
+            }
+
             dev.last_record = Some(rec.clone());
+        }
+        for (mac, transition) in stalls {
+            match transition {
+                None => {
+                    warn!("FAN STALL on {mac}: fans commanded but every tach reads 0");
+                    self.reliability.on_stall();
+                    notify_stall(&mac);
+                }
+                Some(polls) => {
+                    warn!("fan stall on {mac} ended after {polls} polls");
+                }
+            }
         }
         for (mac, surge) in surges {
             warn!(
@@ -1082,6 +1114,7 @@ impl<T: UsbIo> Supervisor<T> {
                         last_rgb_upload: None,
                         last_record: None,
                         surge: Default::default(),
+                        stall: Default::default(),
                         seq_index: 1,
                     },
                 );
@@ -1191,6 +1224,7 @@ fn build_runtimes(cfg: &Config) -> (HashMap<String, CurveRuntime>, HashMap<[u8; 
                     last_rgb_upload: None,
                     last_record: None,
                     surge: Default::default(),
+                    stall: Default::default(),
                     seq_index: 1,
                 },
             );
@@ -1208,6 +1242,21 @@ fn mac_str(mac: &[u8; 6]) -> String {
 
 fn due(last: Option<Instant>, now: Instant, interval: Duration) -> bool {
     last.is_none_or(|t| now.duration_since(t) >= interval)
+}
+
+/// Desktop notification for a confirmed fan stall (fires per episode —
+/// stalls are rare and dangerous enough that no rate limit applies).
+fn notify_stall(mac: &str) {
+    let child = std::process::Command::new("notify-send")
+        .arg("--urgency=critical")
+        .arg("llw-daemon")
+        .arg(format!("FAN STALL: {mac} commanded but not spinning"))
+        .spawn();
+    if let Ok(mut c) = child {
+        std::thread::spawn(move || {
+            let _ = c.wait();
+        });
+    }
 }
 
 /// Desktop notification for a detected fan surge (rate-limited by caller).

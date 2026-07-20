@@ -36,6 +36,8 @@ export interface Telemetry {
   /** Fan-surge watchdog (additive fields — absent on pre-watchdog daemons). */
   total_surges?: number;
   last_surge_peak_rpm?: number;
+  /** Fan stalls: commanded but not spinning — the dangerous one. */
+  total_stalls?: number;
 }
 
 export interface DeviceStatus {

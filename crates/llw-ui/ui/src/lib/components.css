@@ -1569,3 +1569,8 @@
 .stat-value.stat-warn {
   color: var(--warn);
 }
+
+/* Stall watchdog: commanded-but-stopped is the dangerous state — red */
+.stat-value.stat-danger {
+  color: var(--danger);
+}

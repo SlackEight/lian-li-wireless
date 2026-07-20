@@ -142,6 +142,51 @@ impl SurgeTracker {
     }
 }
 
+
+/// A judged fan stall: commanded nonzero PWM while every active fan's tach
+/// read zero for at least STALL_MIN_POLLS consecutive polls. The 2026-07-20
+/// incident: fans physically stopped ~30s while PWM readback stayed clean —
+/// invisible to both the dropout filter (readback nonzero) and the surge
+/// tracker (rpm low, not high).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stall {
+    /// Polls the stall lasted (caller converts to time via its cadence).
+    pub polls: u32,
+}
+
+/// Consecutive all-zero-tach polls before a stall is declared (debounce:
+/// single zero-rpm reads can be tach glitches).
+pub const STALL_MIN_POLLS: u32 = 3;
+
+/// Per-device stall watchdog. Feed it every GetDev poll. Returns
+/// `Some(Stall)` once when a stall ENDS (fans spin again or stop being
+/// commanded), carrying its length; `stalled()` exposes the live state so
+/// callers can alarm while it is still happening.
+#[derive(Debug, Default)]
+pub struct StallTracker {
+    zero_polls: u32,
+}
+
+impl StallTracker {
+    /// `commanded`: nonzero desired PWM on some active slot;
+    /// `all_rpm_zero`: every active fan slot's tach read 0 this poll.
+    pub fn observe(&mut self, commanded: bool, all_rpm_zero: bool) -> Option<Stall> {
+        if commanded && all_rpm_zero {
+            self.zero_polls = self.zero_polls.saturating_add(1);
+            None
+        } else {
+            let ended = (self.zero_polls >= STALL_MIN_POLLS).then_some(Stall { polls: self.zero_polls });
+            self.zero_polls = 0;
+            ended
+        }
+    }
+
+    /// True while a debounced stall is in progress (for live alarming).
+    pub fn stalled(&self) -> bool {
+        self.zero_polls >= STALL_MIN_POLLS
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +302,37 @@ mod tests {
         for _ in 0..=SURGE_TAIL_POLLS {
             assert_eq!(t.observe(true, false, 2000, SURGE_TAIL_POLLS), None);
         }
+    }
+
+    #[test]
+    fn stall_debounces_and_reports_on_recovery() {
+        let mut t = StallTracker::default();
+        assert_eq!(t.observe(true, false), None);
+        assert_eq!(t.observe(true, true), None); // 1 — could be a tach glitch
+        assert_eq!(t.observe(true, true), None); // 2
+        assert!(!t.stalled());
+        assert_eq!(t.observe(true, true), None); // 3 — stall live
+        assert!(t.stalled());
+        assert_eq!(t.observe(true, true), None); // 4
+        let stall = t.observe(true, false).expect("recovery must report");
+        assert_eq!(stall.polls, 4);
+        assert!(!t.stalled());
+    }
+
+    #[test]
+    fn short_zero_blips_are_not_stalls() {
+        let mut t = StallTracker::default();
+        t.observe(true, true);
+        t.observe(true, true);
+        assert_eq!(t.observe(true, false), None, "2 polls is a glitch, not a stall");
+    }
+
+    #[test]
+    fn uncommanded_zero_rpm_is_fine() {
+        let mut t = StallTracker::default();
+        for _ in 0..10 {
+            assert_eq!(t.observe(false, true), None);
+        }
+        assert!(!t.stalled(), "fans commanded off are allowed to be stopped");
     }
 }

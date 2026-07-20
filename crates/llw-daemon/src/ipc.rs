@@ -333,6 +333,7 @@ mod tests {
                 failed_tier1_streak: 0,
                 total_surges: 0,
                 last_surge_peak_rpm: 0,
+                total_stalls: 0,
             },
             devices: vec![],
             air: vec![],
