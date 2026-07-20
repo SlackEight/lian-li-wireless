@@ -1800,3 +1800,11 @@ Burst-recovery probe: master accepts a correct frame in 0.3-1.2 s of 30 ms-space
 5. Surge watchdog tail made time-based (8 s regardless of poll cadence).
 
 Remaining levers, owner decision: (a) move the TX dongle out of the case (front/top USB or short extension — raises TX→master margin over the noise; likely the single biggest physical win); (b) re-bind the cluster with a chosen master_channel (bind frames carry rf[15]; June's quiet ch2 suggests channel is chosen at pair time — would move us off the noisy frequency permanently; needs owner present, uses the M4a bind machinery, doubles as its live validation); (c) 2.4 GHz hygiene on their own router (it broadcasts on WiFi ch10).
+
+### CHANNEL MOVED — bind-time steering confirmed (2026-07-20, owner present)
+
+Multi-day watchdog data: 2 surges the first post-fix evening, 33 and 36 the next two days, then 162 today with peaks back at 2200 — the mitigations hold under moderate noise but today's environment overwhelmed them on ch8. Two experiments in the owner's window:
+1. **Silent-migration test FALSIFIED**: 90s of total RF silence — master stayed on ch8. Also learned the **flash-default fallback does NOT protect**: fans ran full (2190) during the silence despite the Jul-17 SaveConfig snapshot; that fix's apparent effect was coincidental. The host-lost revert target is hardware-full, period.
+2. **Re-bind with master_channel=2 in rf[15] WORKED**: bind burst to the SAME master/rx with the target channel byte, transmitted on ch8 → device converged to ch2 in <6s → SaveConfig persisted → daemon re-acquired on **channel 2**. Channel IS set at pair time — this is how June's network lived on ch2, and answers M2a Q2 for real: steering exists, but only through the bind path.
+
+Design consequence: the safe no-unbind re-bind (same master, same rx, new channel) is a first-class recovery tool. Future work: `preferred_channel` in config + daemon-side auto-rebind when acquired channel ≠ preferred (would also self-heal the cold-boot-on-8 case if the persisted channel doesn't survive power loss — unverified until the next reboot). Validation window running vs today's 162-surge baseline.
