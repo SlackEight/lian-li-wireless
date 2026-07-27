@@ -54,6 +54,12 @@ export interface DeviceStatus {
   /** null = daemon has no expected effect (or no record yet) to compare. */
   rgb_in_sync: boolean | null;
   dropout_streak: number;
+  /**
+   * "software" | "motherboard" — derived by the daemon from the device's
+   * slots. Additive M4f field — optional so snapshots from pre-M4f daemons
+   * still type-check (the UI hides the toggle when absent).
+   */
+  speed_source?: string;
 }
 
 export interface AirDeviceStatus {
@@ -108,6 +114,35 @@ export interface StatusData {
  */
 export function sliceToFanCount<T>(values: readonly T[], fanCount: number): T[] {
   return values.slice(0, fanCount);
+}
+
+/* ── Air-row visibility (Devices screen) ── */
+
+/**
+ * How the Devices screen treats an air-inventory entry:
+ *  - `hidden`    — Ours AND configured: already rendered as a device card.
+ *  - `adoptable` — Ours but NOT configured: RF-paired to our master yet
+ *                  absent from config ("paired, not linked"); Link issues the
+ *                  same `bind` command and the daemon adopts it without RF.
+ *  - `linkable`  — Unbound: the normal full-RF Link flow.
+ *  - `foreign`   — bound to another controller: dimmed, Link disabled.
+ */
+export type AirRowKind = 'hidden' | 'linkable' | 'adoptable' | 'foreign';
+
+/**
+ * Pure row classifier. `configuredMacs` is the set of macs in
+ * `StatusData.devices` (the daemon formats macs consistently, so exact-match
+ * membership is safe — the same assumption the bind flow already makes).
+ * Only an Ours bond consults membership; Foreign/Unbound classify on bond
+ * alone.
+ */
+export function airRowKind(
+  entry: Pick<AirDeviceStatus, 'bond' | 'mac'>,
+  configuredMacs: ReadonlySet<string>,
+): AirRowKind {
+  if (entry.bond === 'Foreign') return 'foreign';
+  if (entry.bond === 'Unbound') return 'linkable';
+  return configuredMacs.has(entry.mac) ? 'hidden' : 'adoptable';
 }
 
 /* ── Store ── */

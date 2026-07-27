@@ -140,7 +140,7 @@ export default function Lighting() {
       ) : devices.length === 0 ? (
         <div className="card-muted placeholder-card">
           <span>No configured devices</span>
-          <span className="hint">bind one from Devices to light the stage</span>
+          <span className="hint">link one from Devices to light the stage</span>
         </div>
       ) : (
         <>

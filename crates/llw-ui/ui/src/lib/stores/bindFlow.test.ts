@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   createBindFlow,
   isActiveOp,
+  opLabel,
   CONVERGENCE_TIMEOUT_MS,
   SETTLING_MAX_ATTEMPTS,
   SETTLING_RETRY_GAP_MS,
@@ -159,7 +160,9 @@ describe('bind flow', () => {
     expect(flow.getSnapshot()[MAC]).toEqual({
       op: 'bind',
       phase: 'failed',
-      message: 'bind failed — device did not converge',
+      // Owner-language copy: user-visible surfaces say link/unlink even
+      // though the op/protocol names stay bind/unbind.
+      message: 'link failed — device did not converge',
     });
   });
 
@@ -282,5 +285,10 @@ describe('bind flow', () => {
     expect(isActiveOp({ op: 'unbind', phase: 'converging' })).toBe(true);
     expect(isActiveOp({ op: 'bind', phase: 'done' })).toBe(false);
     expect(isActiveOp({ op: 'unbind', phase: 'failed', message: 'x' })).toBe(false);
+  });
+
+  it('opLabel maps protocol op names to owner language', () => {
+    expect(opLabel('bind')).toBe('link');
+    expect(opLabel('unbind')).toBe('unlink');
   });
 });

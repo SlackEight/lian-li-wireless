@@ -11,9 +11,11 @@ import {
   type ConfigCurve,
   type ConfigDevice,
   type SensorSpec,
+  MB_SLOT,
   addCurve,
   curveReferences,
   deleteCurve,
+  isReservedCurveName,
   renameCurve,
   setCurvePoints,
   setCurveSensor,
@@ -200,6 +202,9 @@ function SlotCard({
 }) {
   const displayName = cfgDev.name?.trim() ? cfgDev.name : device.kind;
   const rpms = sliceToFanCount(device.rpm, device.fan_count);
+  // MB-mode devices (all slots "mb") are wire-driven: slot editing is parked
+  // until the owner flips the Speed toggle on the Devices card. RPM stays live.
+  const mbControlled = device.speed_source === 'motherboard';
 
   return (
     <div className="card slot-card">
@@ -225,7 +230,29 @@ function SlotCard({
             const isCurve = typeof slot === 'string';
             // A reference to a curve deleted out from under us should still
             // render (the daemon would refuse the save) — keep it visible.
-            const orphan = isCurve && !curveNames.includes(slot);
+            const orphan = isCurve && slot !== MB_SLOT && !curveNames.includes(slot);
+            if (mbControlled) {
+              return (
+                <Fragment key={i}>
+                  <span className="slot-cell name">{i + 1}</span>
+                  <span className="slot-cell mode">
+                    <select
+                      className="slot-select"
+                      disabled
+                      aria-label={`fan ${i + 1} speed source`}
+                      value={MB_SLOT}
+                    >
+                      <option value={MB_SLOT}>motherboard</option>
+                    </select>
+                  </span>
+                  <span className="slot-cell">
+                    <span className="slot-curve-note">motherboard controlled</span>
+                  </span>
+                  <span className="slot-cell num">{rpm}</span>
+                  <span className="slot-cell num">{pwmPercent(device.readback_pwm[i])}</span>
+                </Fragment>
+              );
+            }
             return (
               <Fragment key={i}>
                 <span className="slot-cell name">{i + 1}</span>
@@ -257,6 +284,11 @@ function SlotCard({
                       </option>
                     ))}
                     {orphan && <option value={curveValue(slot)}>{slot} (missing)</option>}
+                    {/* A stray "mb" slot in a mixed config (hand-edited; the
+                        daemon runs it as 0%) — reassigning it here un-mixes. */}
+                    {isCurve && slot === MB_SLOT && (
+                      <option value={curveValue(slot)}>motherboard</option>
+                    )}
                   </select>
                 </span>
                 <span className="slot-cell">
@@ -352,6 +384,10 @@ export default function Cooling() {
   function onRename(oldName: string, raw: string) {
     const name = raw.trim();
     if (!working || name === '' || name === oldName) return;
+    if (isReservedCurveName(name)) {
+      toastStore.push('warn', `"${MB_SLOT}" is reserved for motherboard control`);
+      return;
+    }
     const next = renameCurve(working, oldName, name);
     if (next === working) {
       toastStore.push('warn', `a curve named "${name}" already exists`);
@@ -364,6 +400,10 @@ export default function Cooling() {
   function onAdd(raw: string) {
     if (!working) return;
     const name = raw.trim();
+    if (isReservedCurveName(name)) {
+      toastStore.push('warn', `"${MB_SLOT}" is reserved for motherboard control`);
+      return;
+    }
     // New curves start on the first enumerated sensor; with no enumeration
     // the placeholder spec reads as "(unavailable)" until rebound.
     const sensor = sensors[0]?.spec ?? { hwmon_name: '', input: '' };
@@ -543,7 +583,7 @@ export default function Cooling() {
           ) : data.devices.length === 0 ? (
             <div className="card-muted placeholder-card">
               <span>No configured devices</span>
-              <span className="hint">bind one from Devices</span>
+              <span className="hint">link one from Devices</span>
             </div>
           ) : (
             <div className="slot-cards">

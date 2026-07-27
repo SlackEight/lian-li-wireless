@@ -23,6 +23,26 @@ import type { CurvePoint } from './curveModel.js';
 /** Untagged SlotSpeed: number = fixed percent, string = curve name. */
 export type SlotSpeed = number | string;
 
+/**
+ * Wire sentinel for a motherboard-controlled slot (config.rs `SlotSpeed`
+ * gained `MbSync`, serialized as the string `"mb"` in M4f). The daemon
+ * refuses a curve named `"mb"` — see `isReservedCurveName`.
+ */
+export const MB_SLOT = 'mb';
+
+/** Default duty (%) when a device returns to software speed control. */
+export const SOFTWARE_DEFAULT_PCT = 40;
+
+/**
+ * True for names the daemon reserves: a curve may not be called `"mb"`
+ * (trimmed, exact — the wire match is case-sensitive). `addCurve` and
+ * `renameCurve` refuse these with the usual same-reference no-op; screens
+ * check this first so they can toast a precise message.
+ */
+export function isReservedCurveName(name: string): boolean {
+  return name.trim() === MB_SLOT;
+}
+
 /** Native hwmon addressing — config.rs `SensorSpec`, verbatim wire shape. */
 export interface SensorSpec {
   hwmon_name: string;
@@ -119,7 +139,8 @@ export function setCurveSensor(
  * Rename a curve AND every device-slot reference to it (the daemon validates
  * referential integrity on SetConfig — a rename must never orphan a slot).
  * No-ops (same reference): unknown `oldName`, blank `newName`, `newName`
- * already taken by another curve, or oldName === newName.
+ * already taken by another curve, oldName === newName, or the reserved
+ * `"mb"`.
  */
 export function renameCurve(
   config: CoolingConfig,
@@ -127,7 +148,7 @@ export function renameCurve(
   newName: string,
 ): CoolingConfig {
   const trimmed = newName.trim();
-  if (trimmed === '' || trimmed === oldName) return config;
+  if (trimmed === '' || trimmed === oldName || isReservedCurveName(trimmed)) return config;
   if (!config.curves.some((c) => c.name === oldName)) return config;
   if (config.curves.some((c) => c.name === trimmed)) return config;
   return {
@@ -157,8 +178,9 @@ export function deleteCurve(config: CoolingConfig, name: string): DeleteCurveRes
 }
 
 /**
- * Append a new curve. No-ops (same reference): blank name or a name already
- * in use. `points` defaults to [`DEFAULT_CURVE_POINTS`].
+ * Append a new curve. No-ops (same reference): blank name, a name already
+ * in use, or the reserved `"mb"`. `points` defaults to
+ * [`DEFAULT_CURVE_POINTS`].
  */
 export function addCurve(
   config: CoolingConfig,
@@ -167,7 +189,7 @@ export function addCurve(
   points: CurvePoint[] = DEFAULT_CURVE_POINTS,
 ): CoolingConfig {
   const trimmed = name.trim();
-  if (trimmed === '') return config;
+  if (trimmed === '' || isReservedCurveName(trimmed)) return config;
   if (config.curves.some((c) => c.name === trimmed)) return config;
   return {
     ...config,
@@ -201,6 +223,46 @@ export function setSlot(
     devices: config.devices.map((d) =>
       d.mac === deviceMac
         ? { ...d, slots: d.slots.map((s, i) => (i === slotIdx ? value : s)) }
+        : d,
+    ),
+  };
+}
+
+/**
+ * Hand the whole device to its motherboard header: EVERY slot (active and
+ * spare — the daemon derives `speed_source` from the full set) becomes the
+ * `"mb"` sentinel. No-op (same reference) only for an unknown MAC — an
+ * already-mb device still yields a fresh object, so callers can round-trip
+ * unconditionally.
+ */
+export function setDeviceAllSlotsMb(config: CoolingConfig, deviceMac: string): CoolingConfig {
+  if (!config.devices.some((d) => d.mac === deviceMac)) return config;
+  return {
+    ...config,
+    devices: config.devices.map((d) =>
+      d.mac === deviceMac ? { ...d, slots: d.slots.map((): SlotSpeed => MB_SLOT) } : d,
+    ),
+  };
+}
+
+/**
+ * Return a device to software speed control: active slots (index <
+ * `fanCount`) become `pct` (clamped to an integer 0–100, default 40%), spare
+ * slots become 0. No-op (same reference) only for an unknown MAC.
+ */
+export function setDeviceSoftwareSlots(
+  config: CoolingConfig,
+  deviceMac: string,
+  fanCount: number,
+  pct: number = SOFTWARE_DEFAULT_PCT,
+): CoolingConfig {
+  if (!config.devices.some((d) => d.mac === deviceMac)) return config;
+  const value = Math.round(Math.min(100, Math.max(0, Number.isFinite(pct) ? pct : 0)));
+  return {
+    ...config,
+    devices: config.devices.map((d) =>
+      d.mac === deviceMac
+        ? { ...d, slots: d.slots.map((_, i): SlotSpeed => (i < fanCount ? value : 0)) }
         : d,
     ),
   };

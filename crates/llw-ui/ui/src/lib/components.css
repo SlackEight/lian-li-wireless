@@ -505,7 +505,18 @@
   border-color: rgba(224, 96, 96, 0.4);
 }
 
-/* Air rows (non-Ours) */
+/* Speed-source toggle on the device card (reuses .segmented/.segment);
+   pushed left so the Unlink control keeps its right edge */
+.device-speed {
+  margin-right: auto;
+}
+
+.device-speed .segment {
+  flex: none; /* size by label, not the rail's equal-width split */
+  padding: 3px 12px;
+}
+
+/* Air rows (every non-hidden airRowKind) */
 .air-list {
   display: flex;
   flex-direction: column;
@@ -717,6 +728,14 @@
     var(--surface);
   border-color: rgba(232, 168, 75, 0.4);
   color: var(--warn);
+}
+
+.toast.ok {
+  background:
+    linear-gradient(rgba(126, 226, 168, 0.12), rgba(126, 226, 168, 0.12)),
+    var(--surface);
+  border-color: rgba(126, 226, 168, 0.35);
+  color: var(--ok);
 }
 
 /* ── Curve editor ── */

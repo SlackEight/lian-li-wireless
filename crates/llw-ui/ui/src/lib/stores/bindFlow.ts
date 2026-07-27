@@ -37,6 +37,14 @@ export const CONVERGENCE_TIMEOUT_MS = 15_000;
 
 export type OpKind = 'bind' | 'unbind';
 
+/**
+ * Owner-language label for an op — every user-visible surface says
+ * Link/Unlink; `bind`/`unbind` stay as the protocol/command names.
+ */
+export function opLabel(op: OpKind): 'link' | 'unlink' {
+  return op === 'bind' ? 'link' : 'unlink';
+}
+
 export type OpState =
   | { op: OpKind; phase: 'requesting' }
   | { op: OpKind; phase: 'settling-retry'; attempt: number }
@@ -122,7 +130,7 @@ export function createBindFlow(invoke: OpInvokeFn, opts: { timers?: Timers } = {
           c.state = {
             op,
             phase: 'failed',
-            message: `${op} timed out — no convergence after ${CONVERGENCE_TIMEOUT_MS / 1000}s; check Health`,
+            message: `${opLabel(op)} timed out — no convergence after ${CONVERGENCE_TIMEOUT_MS / 1000}s; check Health`,
           };
           publish();
         }, CONVERGENCE_TIMEOUT_MS);
@@ -189,7 +197,7 @@ export function createBindFlow(invoke: OpInvokeFn, opts: { timers?: Timers } = {
             entry.state = {
               op: st.op,
               phase: 'failed',
-              message: `${st.op} failed — device did not converge`,
+              message: `${opLabel(st.op)} failed — device did not converge`,
             };
             changed = true;
             continue;

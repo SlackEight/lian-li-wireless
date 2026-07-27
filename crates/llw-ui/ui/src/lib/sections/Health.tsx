@@ -108,6 +108,9 @@ function DeviceSyncCard({ device }: { device: DeviceStatus }) {
     desired: device.desired_pwm[i],
     readback: device.readback_pwm[i],
   }));
+  // Wire-driven device: PWM percentages would mislead (readback is 0 while
+  // the header sets the real speed) — show "MB" instead.
+  const mb = device.speed_source === 'motherboard';
 
   return (
     <div className="card device-sync-card">
@@ -127,8 +130,8 @@ function DeviceSyncCard({ device }: { device: DeviceStatus }) {
         {fans.map((fan, i) => (
           <Fragment key={i}>
             <span className="fan-cell name">{i + 1}</span>
-            <span className="fan-cell">{pwmPercent(fan.desired)}</span>
-            <span className="fan-cell">{pwmPercent(fan.readback)}</span>
+            <span className="fan-cell">{mb ? 'MB' : pwmPercent(fan.desired)}</span>
+            <span className="fan-cell">{mb ? 'MB' : pwmPercent(fan.readback)}</span>
             <span className="fan-cell">{fan.rpm}</span>
           </Fragment>
         ))}
@@ -167,7 +170,7 @@ export default function Health() {
           {data.devices.length === 0 ? (
             <div className="card-muted placeholder-card">
               <span>No configured devices</span>
-              <span className="hint">bind one from Devices</span>
+              <span className="hint">link one from Devices</span>
             </div>
           ) : (
             <div className="device-sync-grid">

@@ -2,13 +2,18 @@ import { describe, it, expect } from 'vitest';
 import {
   type CoolingConfig,
   DEFAULT_CURVE_POINTS,
+  MB_SLOT,
+  SOFTWARE_DEFAULT_PCT,
   curveReferences,
+  isReservedCurveName,
   setCurvePoints,
   setCurveSensor,
   renameCurve,
   deleteCurve,
   addCurve,
   setSlot,
+  setDeviceAllSlotsMb,
+  setDeviceSoftwareSlots,
 } from './coolingModel.js';
 
 /**
@@ -256,6 +261,90 @@ describe('setSlot', () => {
     expect(setSlot(cfg, 'ff:ff:ff:ff:ff:ff', 0, 50)).toBe(cfg);
     expect(setSlot(cfg, '02:8b:51:62:32:e1', 4, 50)).toBe(cfg);
     expect(setSlot(cfg, '02:8b:51:62:32:e1', -1, 50)).toBe(cfg);
+  });
+});
+
+describe('setDeviceAllSlotsMb', () => {
+  it('sets every slot — active and spare — to "mb", preserving other fields', () => {
+    const cfg = sample();
+    const next = setDeviceAllSlotsMb(cfg, '02:8b:51:62:32:e1');
+    expect(next.devices[0].slots).toEqual([MB_SLOT, MB_SLOT, MB_SLOT, MB_SLOT]);
+    expect(next.devices[0].name).toBe('top fans');
+    expect(next.devices[0].color).toEqual(cfg.devices[0].color);
+    expect(next.devices[1]).toBe(cfg.devices[1]); // other devices untouched (same ref)
+    expectUntouchedExcept(cfg, next, ['devices']);
+  });
+
+  it('an already-mb device still yields a fresh object (round-trip friendly)', () => {
+    const once = setDeviceAllSlotsMb(sample(), '02:8b:51:62:32:e1');
+    const twice = setDeviceAllSlotsMb(once, '02:8b:51:62:32:e1');
+    expect(twice).not.toBe(once);
+    expect(twice.devices[0].slots).toEqual([MB_SLOT, MB_SLOT, MB_SLOT, MB_SLOT]);
+  });
+
+  it('unknown mac is a no-op returning the same reference', () => {
+    const cfg = sample();
+    expect(setDeviceAllSlotsMb(cfg, 'ff:ff:ff:ff:ff:ff')).toBe(cfg);
+  });
+});
+
+describe('setDeviceSoftwareSlots', () => {
+  it('sets active slots to the 40% default and spare slots to 0', () => {
+    const cfg = sample();
+    const next = setDeviceSoftwareSlots(cfg, '02:8b:51:62:32:e1', 2);
+    expect(SOFTWARE_DEFAULT_PCT).toBe(40);
+    expect(next.devices[0].slots).toEqual([40, 40, 0, 0]);
+    expect(next.devices[1]).toBe(cfg.devices[1]);
+    expectUntouchedExcept(cfg, next, ['devices']);
+  });
+
+  it('covers all four slots when fan_count is 4; zeroes all when 0', () => {
+    expect(setDeviceSoftwareSlots(sample(), '02:8b:51:62:32:e1', 4).devices[0].slots).toEqual([
+      40, 40, 40, 40,
+    ]);
+    expect(setDeviceSoftwareSlots(sample(), '02:8b:51:62:32:e1', 0).devices[0].slots).toEqual([
+      0, 0, 0, 0,
+    ]);
+  });
+
+  it('honours an explicit percent, clamped to an integer 0–100', () => {
+    expect(setDeviceSoftwareSlots(sample(), '02:8b:51:62:32:e1', 3, 250).devices[0].slots).toEqual(
+      [100, 100, 100, 0],
+    );
+    expect(setDeviceSoftwareSlots(sample(), '02:8b:51:62:32:e1', 1, 32.6).devices[0].slots).toEqual(
+      [33, 0, 0, 0],
+    );
+    expect(setDeviceSoftwareSlots(sample(), '02:8b:51:62:32:e1', 1, -5).devices[0].slots).toEqual([
+      0, 0, 0, 0,
+    ]);
+  });
+
+  it('unknown mac is a no-op returning the same reference', () => {
+    const cfg = sample();
+    expect(setDeviceSoftwareSlots(cfg, 'ff:ff:ff:ff:ff:ff', 4)).toBe(cfg);
+  });
+});
+
+describe('reserved curve name "mb"', () => {
+  it('isReservedCurveName matches exactly "mb" after trimming, case-sensitively', () => {
+    expect(isReservedCurveName('mb')).toBe(true);
+    expect(isReservedCurveName('  mb  ')).toBe(true);
+    expect(isReservedCurveName('MB')).toBe(false); // wire match is case-sensitive
+    expect(isReservedCurveName('mbx')).toBe(false);
+    expect(isReservedCurveName('')).toBe(false);
+  });
+
+  it('addCurve refuses "mb" (same reference), padded or not', () => {
+    const cfg = sample();
+    const sensor = { hwmon_name: 'k10temp', input: 'temp1_input' };
+    expect(addCurve(cfg, 'mb', sensor)).toBe(cfg);
+    expect(addCurve(cfg, '  mb ', sensor)).toBe(cfg);
+  });
+
+  it('renameCurve refuses renaming to "mb" (same reference)', () => {
+    const cfg = sample();
+    expect(renameCurve(cfg, 'cpu', 'mb')).toBe(cfg);
+    expect(renameCurve(cfg, 'cpu', ' mb ')).toBe(cfg);
   });
 });
 

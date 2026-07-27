@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  airRowKind,
   createStatusStore,
   sliceToFanCount,
   UNREACHABLE_PREFIX,
+  type AirDeviceStatus,
   type StatusData,
   type VisibilitySource,
 } from './status.js';
@@ -281,5 +283,32 @@ describe('status store', () => {
     expect(sliceToFanCount([2187, 2187, 2206, 0], 3)).toEqual([2187, 2187, 2206]);
     expect(sliceToFanCount([86, 86, 86, 0], 4)).toEqual([86, 86, 86, 0]);
     expect(sliceToFanCount([0, 0, 0, 0], 0)).toEqual([]);
+  });
+});
+
+describe('airRowKind', () => {
+  const MAC = '02:8b:51:62:32:e1';
+  const OTHER = '49:8b:62:62:32:e1';
+  const configured = new Set([MAC]);
+  const entry = (bond: AirDeviceStatus['bond'], mac: string) => ({ bond, mac });
+
+  it('Ours + configured is hidden (already rendered as a device card)', () => {
+    expect(airRowKind(entry('Ours', MAC), configured)).toBe('hidden');
+  });
+
+  it('Ours + unconfigured is adoptable ("paired, not linked")', () => {
+    expect(airRowKind(entry('Ours', OTHER), configured)).toBe('adoptable');
+    // No configured devices at all: every Ours entry is adoptable.
+    expect(airRowKind(entry('Ours', MAC), new Set<string>())).toBe('adoptable');
+  });
+
+  it('Unbound is linkable regardless of configured membership', () => {
+    expect(airRowKind(entry('Unbound', OTHER), configured)).toBe('linkable');
+    expect(airRowKind(entry('Unbound', MAC), configured)).toBe('linkable');
+  });
+
+  it('Foreign is foreign regardless of configured membership', () => {
+    expect(airRowKind(entry('Foreign', OTHER), configured)).toBe('foreign');
+    expect(airRowKind(entry('Foreign', MAC), configured)).toBe('foreign');
   });
 });

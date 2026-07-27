@@ -4,11 +4,19 @@ import { useStatus } from '../stores/useStatus.js';
 import { useBindFlow, bindFlow } from '../stores/useBindFlow.js';
 import { toastStore } from '../stores/useToasts.js';
 import {
+  airRowKind,
   sliceToFanCount,
   type AirDeviceStatus,
+  type AirRowKind,
   type DeviceStatus,
 } from '../stores/status.js';
 import { isActiveOp, type OpState } from '../stores/bindFlow.js';
+import {
+  setDeviceAllSlotsMb,
+  setDeviceSoftwareSlots,
+  SOFTWARE_DEFAULT_PCT,
+  type CoolingConfig,
+} from '../stores/coolingModel.js';
 import ConfirmDialog from '../components/ConfirmDialog.js';
 
 /* ── Config mirror — round-tripped verbatim; only `name` is ever mutated ── */
@@ -69,8 +77,8 @@ function OpProgress({ state }: { state: OpState }) {
       : state.phase === 'converging'
         ? 'converging…'
         : state.op === 'bind'
-          ? 'binding…'
-          : 'removing…';
+          ? 'linking…'
+          : 'unlinking…';
   return (
     <span className="op-progress">
       <span className="acquiring-dot" aria-hidden="true"></span>
@@ -125,23 +133,73 @@ function DeviceName({
   );
 }
 
+/** Speed-source values as the daemon reports them in `speed_source`. */
+type SpeedSource = 'software' | 'motherboard';
+
+function SpeedToggle({
+  label,
+  source,
+  disabled,
+  onSelect,
+}: {
+  label: string;
+  source: string;
+  disabled: boolean;
+  onSelect: (next: SpeedSource) => void;
+}) {
+  const mb = source === 'motherboard';
+  return (
+    <div className="segmented device-speed" role="radiogroup" aria-label={`${label} speed source`}>
+      <button
+        type="button"
+        role="radio"
+        aria-checked={!mb}
+        className={mb ? 'segment' : 'segment active'}
+        disabled={disabled}
+        onClick={() => {
+          if (mb) onSelect('software');
+        }}
+      >
+        Software
+      </button>
+      <button
+        type="button"
+        role="radio"
+        aria-checked={mb}
+        className={mb ? 'segment active' : 'segment'}
+        disabled={disabled}
+        onClick={() => {
+          if (!mb) onSelect('motherboard');
+        }}
+      >
+        Motherboard
+      </button>
+    </div>
+  );
+}
+
 function ConfiguredCard({
   device,
   cfg,
   op,
+  speedBusy,
   onRename,
+  onSpeedSource,
   onAskUnbind,
 }: {
   device: DeviceStatus;
   cfg: ConfigDevice | undefined;
   op: OpState | undefined;
+  speedBusy: boolean;
   onRename: (mac: string, raw: string) => void;
-  onAskUnbind: (mac: string, label: string) => void;
+  onSpeedSource: (device: DeviceStatus, next: SpeedSource) => void;
+  onAskUnbind: (target: { mac: string; label: string; mb: boolean }) => void;
 }) {
   const unbindOp = op?.op === 'unbind' ? op : undefined;
   const displayName = cfg?.name?.trim() ? cfg.name : device.kind;
   const rpms = sliceToFanCount(device.rpm, device.fan_count);
   const rpm = rpms.length > 0 ? Math.max(...rpms) : null;
+  const mb = device.speed_source === 'motherboard';
 
   return (
     <div className="card device-card">
@@ -165,15 +223,24 @@ function ConfiguredCard({
         </div>
       </div>
       <div className="device-card-foot">
+        {device.speed_source !== undefined && (
+          // Hidden entirely on pre-M4f daemons (no speed_source in Status).
+          <SpeedToggle
+            label={displayName}
+            source={device.speed_source}
+            disabled={speedBusy || isActiveOp(op)}
+            onSelect={(next) => onSpeedSource(device, next)}
+          />
+        )}
         {unbindOp && isActiveOp(unbindOp) ? (
           <OpProgress state={unbindOp} />
         ) : (
           <button
             type="button"
             className="unbind-btn"
-            onClick={() => onAskUnbind(device.mac, displayName)}
+            onClick={() => onAskUnbind({ mac: device.mac, label: displayName, mb })}
           >
-            Unbind
+            Unlink
           </button>
         )}
       </div>
@@ -181,18 +248,20 @@ function ConfiguredCard({
   );
 }
 
-/* ── Air rows (non-Ours) ── */
+/* ── Air rows (non-hidden classifications from airRowKind) ── */
 
 function AirRow({
   entry,
+  kind,
   op,
-  onBind,
+  onLink,
 }: {
   entry: AirDeviceStatus;
+  kind: AirRowKind;
   op: OpState | undefined;
-  onBind: () => void;
+  onLink: () => void;
 }) {
-  const foreign = entry.bond === 'Foreign';
+  const foreign = kind === 'foreign';
   const bindOp = op?.op === 'bind' ? op : undefined;
 
   return (
@@ -205,21 +274,22 @@ function AirRow({
         ch {entry.channel} · {fanLabel(entry.fan_count)} · seen{' '}
         {entry.last_seen_s === 0 ? 'now' : `${entry.last_seen_s}s ago`}
       </div>
-      {foreign && <span className="air-note">bound to another controller</span>}
+      {foreign && <span className="air-note">linked to another controller</span>}
+      {kind === 'adoptable' && <span className="air-note">paired, not linked</span>}
       <div className="air-action">
         {bindOp && isActiveOp(bindOp) ? (
           <OpProgress state={bindOp} />
         ) : bindOp?.phase === 'done' ? (
-          <span className="op-done">bound ✓</span>
+          <span className="op-done">linked ✓</span>
         ) : (
           <button
             type="button"
             className="bind-btn bloom"
             disabled={foreign}
-            title={foreign ? 'bound to another controller — release it there first' : undefined}
-            onClick={onBind}
+            title={foreign ? 'linked to another controller — release it there first' : undefined}
+            onClick={onLink}
           >
-            Bind
+            Link
           </button>
         )}
       </div>
@@ -233,10 +303,15 @@ export default function Devices() {
   const { data } = useStatus();
   const flow = useBindFlow();
   const [config, setConfig] = useState<DaemonConfig | null>(null);
-  const [unbindTarget, setUnbindTarget] = useState<{ mac: string; label: string } | null>(null);
+  const [unbindTarget, setUnbindTarget] = useState<{
+    mac: string;
+    label: string;
+    mb: boolean;
+  } | null>(null);
+  const [speedBusyMac, setSpeedBusyMac] = useState<string | null>(null);
 
   // Names/tints come from the config; refetch whenever the configured set
-  // changes (a bind/unbind landed). Failures fall back to kind + neutral
+  // changes (a link/unlink landed). Failures fall back to kind + neutral
   // rings silently — the unreachable banner already tells that story.
   const configuredMacs = (data?.devices ?? [])
     .map((d) => d.mac)
@@ -255,7 +330,12 @@ export default function Devices() {
   }, [configuredMacs]);
 
   const cfgByMac = new Map((config?.devices ?? []).map((d) => [d.mac, d]));
-  const airOthers = (data?.air ?? []).filter((a) => a.bond !== 'Ours');
+  const configuredMacSet = new Set((data?.devices ?? []).map((d) => d.mac));
+  // Every air entry the screen shows: non-Ours as always, plus Ours devices
+  // missing from config ("paired, not linked" — Link adopts them without RF).
+  const airRows = (data?.air ?? [])
+    .map((entry) => ({ entry, kind: airRowKind(entry, configuredMacSet) }))
+    .filter((row) => row.kind !== 'hidden');
 
   // Rename: fetch a fresh config, mutate only this device's name, round-trip
   // the whole thing back (the daemon validates). Errors surface as toasts.
@@ -275,6 +355,37 @@ export default function Devices() {
       setConfig(cfg);
     } catch (err) {
       toastStore.push('error', typeof err === 'string' ? err : String(err));
+    }
+  }
+
+  // Speed source: same round-trip idiom — fresh config, all-slot mutation via
+  // the pure helpers, immediate SetConfig. The daemon's next status poll
+  // flips `speed_source`, which settles the segmented control.
+  async function commitSpeedSource(device: DeviceStatus, next: SpeedSource) {
+    if (speedBusyMac !== null) return;
+    setSpeedBusyMac(device.mac);
+    try {
+      const cfg = (await invoke('get_config')) as CoolingConfig;
+      const mutated =
+        next === 'motherboard'
+          ? setDeviceAllSlotsMb(cfg, device.mac)
+          : setDeviceSoftwareSlots(cfg, device.mac, device.fan_count);
+      if (mutated === cfg) {
+        toastStore.push('error', `${device.mac} is not in the daemon config`);
+        return;
+      }
+      await invoke('set_config', { json: mutated });
+      setConfig(mutated as unknown as DaemonConfig);
+      toastStore.push(
+        'ok',
+        next === 'motherboard'
+          ? 'motherboard control — fans follow the header'
+          : `software control at ${SOFTWARE_DEFAULT_PCT}% — refine in Cooling`,
+      );
+    } catch (err) {
+      toastStore.push('error', typeof err === 'string' ? err : String(err));
+    } finally {
+      setSpeedBusyMac(null);
     }
   }
 
@@ -302,7 +413,7 @@ export default function Devices() {
           {data.devices.length === 0 ? (
             <div className="card-muted placeholder-card">
               <span>No configured devices</span>
-              <span className="hint">bind one from the air list below</span>
+              <span className="hint">link one from the air list below</span>
             </div>
           ) : (
             <div className="devices-grid">
@@ -312,27 +423,30 @@ export default function Devices() {
                   device={device}
                   cfg={cfgByMac.get(device.mac)}
                   op={flow[device.mac]}
+                  speedBusy={speedBusyMac !== null}
                   onRename={(mac, raw) => void commitRename(mac, raw)}
-                  onAskUnbind={(mac, label) => setUnbindTarget({ mac, label })}
+                  onSpeedSource={(dev, next) => void commitSpeedSource(dev, next)}
+                  onAskUnbind={setUnbindTarget}
                 />
               ))}
             </div>
           )}
 
           <h2 className="subsection-title">On air</h2>
-          {airOthers.length === 0 ? (
+          {airRows.length === 0 ? (
             <div className="card-muted placeholder-card">
               <span>Nothing else on air</span>
-              <span className="hint">unbound devices appear here when powered</span>
+              <span className="hint">unlinked devices appear here when powered</span>
             </div>
           ) : (
             <div className="air-list">
-              {airOthers.map((entry) => (
+              {airRows.map(({ entry, kind }) => (
                 <AirRow
                   key={entry.mac}
                   entry={entry}
+                  kind={kind}
                   op={flow[entry.mac]}
-                  onBind={() => bindFlow.start('bind', entry.mac)}
+                  onLink={() => bindFlow.start('bind', entry.mac)}
                 />
               ))}
             </div>
@@ -342,9 +456,13 @@ export default function Devices() {
 
       {unbindTarget && (
         <ConfirmDialog
-          title={`Unbind ${unbindTarget.label}?`}
-          body="This removes the device from the daemon config and releases it on air — it stays uncontrolled until bound again."
-          confirmLabel="Unbind"
+          title={`Unlink ${unbindTarget.label}?`}
+          body={
+            unbindTarget.mb
+              ? 'This removes the device from the daemon config and releases it on air. The fans keep running under motherboard control from the header wire.'
+              : 'This removes the device from the daemon config and releases it on air — it stays uncontrolled until linked again.'
+          }
+          confirmLabel="Unlink"
           onConfirm={confirmUnbind}
           onCancel={() => setUnbindTarget(null)}
         />

@@ -10,7 +10,7 @@ import type { Timers } from './status.js';
 /** How long a toast lingers before dismissing itself. */
 export const TOAST_DISMISS_MS = 6000;
 
-export type ToastKind = 'error' | 'warn';
+export type ToastKind = 'error' | 'warn' | 'ok';
 
 export interface Toast {
   id: number;
