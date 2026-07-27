@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <radialGradient id="glow" cx="0.72" cy="0.30" r="0.55">
+      <stop offset="0" stop-color="#7830ff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#7830ff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="#0b0b0f"/>
+  <rect width="128" height="128" rx="28" fill="url(#glow)"/>
+  <rect x="0.75" y="0.75" width="126.5" height="126.5" rx="27.25" fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="1.5"/>
+  <text x="58" y="82" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="44" font-weight="600" letter-spacing="1.5" fill="#f2f2f5" text-anchor="middle">llw</text>
+  <circle cx="95" cy="46" r="6" fill="#965aff"/>
+  <circle cx="95" cy="46" r="11" fill="#7830ff" opacity="0.35"/>
+  <circle cx="95" cy="46" r="16" fill="#5014dc" opacity="0.18"/>
+</svg>

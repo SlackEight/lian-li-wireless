@@ -87,8 +87,16 @@ Development (requires `npm` and the Tauri system deps — `webkit2gtk-4.1` on Ar
     cd .. && cargo tauri dev
 
 The daemon must be running (the app shows an amber "daemon unreachable" banner
-otherwise and reconnects automatically). Production build: `cargo tauri build`
-(packaging lands in M5).
+otherwise and reconnects automatically). Production install (binary + launcher
+entry — `packaging/desktop/` has the .desktop file and icon):
+
+    cd crates/llw-ui/ui && npm run build:wasm && npm run build
+    cd .. && cargo tauri build --no-bundle
+    sudo install -m755 ../../target/release/llw-ui /usr/local/bin/llw-ui
+    install -Dm644 ../../packaging/desktop/llw.desktop ~/.local/share/applications/llw.desktop
+    install -Dm644 ../../packaging/desktop/llw.svg ~/.local/share/icons/hicolor/scalable/apps/llw.svg
+
+AUR packaging lands in M5.
 
 ## License
 

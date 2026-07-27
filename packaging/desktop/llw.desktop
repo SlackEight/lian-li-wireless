@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=llw
+GenericName=Lian Li Wireless Control
+Comment=Fan speed, RGB effects, and device management for Lian Li wireless fans
+Exec=/usr/local/bin/llw-ui
+Icon=llw
+Terminal=false
+Categories=Utility;Settings;HardwareSettings;
+Keywords=lian li;fan;rgb;lighting;cooling;wireless;llw;
+StartupWMClass=llw
