@@ -47,14 +47,6 @@ const SURGE_NOTIFY_COOLDOWN: Duration = Duration::from_secs(60);
 const REVERT_BURST_REPEATS: usize = 4;
 const REVERT_BURST_GAP: Duration = Duration::from_millis(25);
 
-/// PWM sentinel that hands fan speed to the motherboard header (upstream
-/// `fan_controller.rs` MB-sync; M4f protocol findings 2026-07-20).
-const MB_SENTINEL: [u8; 4] = [6, 6, 6, 6];
-/// Sentinel cadence for MB-mode devices: sent once on entering the mode
-/// (fresh runtime → `last_sent` None) and then every 5s. No drift sends and
-/// no revert bursts — readback/RPM are wire-driven in MB mode and would
-/// false-positive both. Task 3's live validation may amend this to silence.
-const MB_SENTINEL_KEEPALIVE: Duration = Duration::from_secs(5);
 
 /// Failsafe engages when a sensor has been unreadable this long — or immediately if it has never produced a reading.
 const SENSOR_FAILSAFE_AFTER: Duration = Duration::from_secs(60);
@@ -568,32 +560,18 @@ impl<T: UsbIo> Supervisor<T> {
             let Ok(mac) = crate::config::parse_mac(&dc.mac) else { continue };
             let Some(dev) = self.devices.get_mut(&mac) else { continue };
             let Some(rec) = dev.last_record.clone() else { continue };
-            // MB-mode device (M4f): hand speed to the motherboard header via
-            // the sentinel — once on entering the mode (fresh runtime →
-            // last_sent None) and then every MB_SENTINEL_KEEPALIVE. No
-            // drift-triggered sends and no revert bursts: readback is
-            // wire-driven (reads 0) and would false-positive both. The raw
-            // sentinel is sent unconstrained (no min-duty clamping).
+            // MB-mode device (M4f): hand speed to the motherboard header by
+            // TOTAL PWM SILENCE. Live validation 2026-07-20: the upstream
+            // [6,6,6,6] hardware-sync sentinel is SLV3-only — on SL-INF it
+            // keeps the host session alive and the master holds the last RF
+            // PWM forever. With no device-addressed PWM at all, the master's
+            // host-lost failsafe hands speed to the header wire in ~10-15s
+            // (broadcast heartbeats do not refresh the per-device timer —
+            // observed pre-enrollment). No drift sends, no revert bursts:
+            // readback is wire-driven and would false-positive both.
             if fan::mb_mode(dc) {
-                dev.desired = MB_SENTINEL;
-                if due(dev.last_sent, now, MB_SENTINEL_KEEPALIVE) {
-                    let rf = pwm_frame(
-                        &mac,
-                        &link.master_mac,
-                        rec.rx_type,
-                        link.channel,
-                        dev.seq_index,
-                        &MB_SENTINEL,
-                    );
-                    let Some(dongle) = self.dongle.as_mut() else { return sent };
-                    if let Err(e) = dongle.send_rf_frame(&rf, rec.channel, rec.rx_type) {
-                        warn!("MB sentinel send failed for {}: {e}", rec.mac_str());
-                        self.drop_dongle();
-                        return sent;
-                    }
-                    dev.last_sent = Some(now);
-                    sent += 1;
-                }
+                dev.desired = [0; 4];
+                dev.last_sent = None;
                 continue;
             }
             // Skip curve-driven devices until their curve has produced output.
@@ -3508,15 +3486,16 @@ mod tests {
         cfg
     }
 
-    /// MB mode: one [6,6,6,6] sentinel frame on entering the mode, then one
-    /// every MB_SENTINEL_KEEPALIVE — no drift sends and no REVERT_BURST even
-    /// though readback stays all-zero (which in software mode triggers both
-    /// on every tick).
+    /// MB mode: TOTAL PWM silence — live validation 2026-07-20 showed the
+    /// SLV3 [6,6,6,6] sentinel keeps the SL-INF host session alive (master
+    /// holds the stale RF PWM forever); silence lets the host-lost failsafe
+    /// hand speed to the header wire. No sends, no drift, no REVERT_BURST
+    /// even though readback stays all-zero (which in software mode triggers
+    /// both on every tick).
     #[test]
-    fn mb_mode_sends_sentinel_then_stays_quiet() {
-        /// Chunk-0 packets of PWM frames addressed to MAC; packet[21..25]
-        /// carries rf[17..21] = the PWM bytes.
-        fn sentinel_frames(writes: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    fn mb_mode_is_pwm_silent() {
+        /// Chunk-0 packets of PWM frames addressed to MAC.
+        fn pwm_frames(writes: &[Vec<u8>]) -> usize {
             writes
                 .iter()
                 .filter(|w| {
@@ -3527,8 +3506,7 @@ mod tests {
                         && w[5] == 0x10
                         && w[6..12] == MAC
                 })
-                .cloned()
-                .collect()
+                .count()
         }
 
         let mut cfg = mb_mode_config();
@@ -3544,33 +3522,18 @@ mod tests {
         let out = sup.step(t0);
         assert!(out.acquired, "must acquire");
 
-        // First fan tick: exactly ONE sentinel frame — zero readback must not
-        // trigger a REVERT_BURST in MB mode.
-        let out = sup.step(t0 + Duration::from_secs(1));
-        assert_eq!(out.sent_pwm, 1, "entering MB mode must send the sentinel once");
-        let frames = sentinel_frames(&tx.written());
-        assert_eq!(frames.len(), 1, "single frame, not a revert burst");
-        assert_eq!(&frames[0][21..25], &MB_SENTINEL, "PWM payload must be the [6,6,6,6] sentinel");
+        // Ten seconds of per-step ticks with zero readback and keepalive_ms=0:
+        // not one device-addressed PWM frame may leave the TX.
+        for s in 1u64..=10 {
+            let out = sup.step(t0 + Duration::from_secs(s));
+            assert_eq!(out.sent_pwm, 0, "no PWM traffic at +{s}s (MB mode)");
+        }
+        assert_eq!(pwm_frames(&tx.written()), 0, "MB mode must be PWM-silent");
         assert_eq!(
             sup.devices.get(&MAC).unwrap().desired,
-            MB_SENTINEL,
-            "desired must reflect the sentinel"
+            [0; 4],
+            "desired reads uncommanded in MB mode"
         );
-
-        // Inside the 5s sentinel keepalive: fully quiet despite per-step
-        // ticks, zero readback, and keepalive_ms=0.
-        for s in 2u64..=5 {
-            let out = sup.step(t0 + Duration::from_secs(s));
-            assert_eq!(out.sent_pwm, 0, "no PWM churn at +{s}s (MB mode)");
-        }
-        assert_eq!(sentinel_frames(&tx.written()).len(), 1, "still one frame before the 5s mark");
-
-        // 5s past the first send: the sentinel keepalive fires, again single-frame.
-        let out = sup.step(t0 + Duration::from_secs(6));
-        assert_eq!(out.sent_pwm, 1, "sentinel keepalive at +6s");
-        let frames = sentinel_frames(&tx.written());
-        assert_eq!(frames.len(), 2);
-        assert_eq!(&frames[1][21..25], &MB_SENTINEL);
     }
 
     /// MB mode silences the reliability machinery for the device: sustained
