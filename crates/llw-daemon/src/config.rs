@@ -62,12 +62,61 @@ pub struct DeviceConfig {
     pub effect: Option<llw_effects::EffectSpec>,
 }
 
-/// Untagged: a number is a constant speed %, a string names a curve. 0 = off.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
+/// The slot string reserved for hardware motherboard-sync. A curve may never
+/// take this name — `validate()` refuses it on both the config-load and
+/// SetConfig paths (they share `validate()`).
+pub const MB_SLOT_NAME: &str = "mb";
+
+/// Untagged wire shape: a number is a constant speed %, the string `"mb"` is
+/// hardware motherboard-sync, any other string names a curve. 0 = off.
+/// (Manual serde: untagged order number → "mb" → curve name.)
+#[derive(Debug, Clone, PartialEq)]
 pub enum SlotSpeed {
     Percent(u8),
+    /// Motherboard-synced: the daemon sends the `[6,6,6,6]` PWM sentinel and
+    /// the set follows its motherboard header (M4f). Serialized as `"mb"`.
+    MbSync,
     Curve(String),
+}
+
+impl Serialize for SlotSpeed {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            SlotSpeed::Percent(pct) => s.serialize_u8(*pct),
+            SlotSpeed::MbSync => s.serialize_str(MB_SLOT_NAME),
+            SlotSpeed::Curve(name) => s.serialize_str(name),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SlotSpeed {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct SlotVisitor;
+        impl serde::de::Visitor<'_> for SlotVisitor {
+            type Value = SlotSpeed;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a percent number, the string \"mb\", or a curve name")
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<SlotSpeed, E> {
+                u8::try_from(v)
+                    .map(SlotSpeed::Percent)
+                    .map_err(|_| E::custom(format!("slot percent {v} does not fit 0-255")))
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<SlotSpeed, E> {
+                u8::try_from(v)
+                    .map(SlotSpeed::Percent)
+                    .map_err(|_| E::custom(format!("slot percent {v} does not fit 0-255")))
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<SlotSpeed, E> {
+                Ok(if v == MB_SLOT_NAME {
+                    SlotSpeed::MbSync
+                } else {
+                    SlotSpeed::Curve(v.to_string())
+                })
+            }
+        }
+        d.deserialize_any(SlotVisitor)
+    }
 }
 
 impl Default for SlotSpeed {
@@ -223,8 +272,15 @@ impl Config {
     }
 
     /// Referential integrity: every named curve exists; brightness in range;
-    /// MACs parseable.
+    /// MACs parseable; no curve claims the reserved `"mb"` slot name.
     pub fn validate(&self) -> Result<()> {
+        for c in &self.curves {
+            if c.name == MB_SLOT_NAME {
+                bail!(
+                    "curve name {MB_SLOT_NAME:?} is reserved for motherboard sync"
+                );
+            }
+        }
         for dev in &self.devices {
             parse_mac(&dev.mac).with_context(|| format!("device mac {:?}", dev.mac))?;
             for slot in &dev.slots {
@@ -237,7 +293,7 @@ impl Config {
                     SlotSpeed::Percent(pct) if *pct > 100 => {
                         bail!("device {} slot percent {} out of range 0-100", dev.mac, pct);
                     }
-                    SlotSpeed::Percent(_) => {}
+                    SlotSpeed::Percent(_) | SlotSpeed::MbSync => {}
                 }
             }
             if let Some(c) = &dev.color {
@@ -418,6 +474,65 @@ mod tests {
         assert_eq!(s, SlotSpeed::Percent(40));
         let s: SlotSpeed = serde_json::from_str(r#""cpu""#).unwrap();
         assert_eq!(s, SlotSpeed::Curve("cpu".into()));
+    }
+
+    #[test]
+    fn slot_speed_mb_serde_shapes() {
+        // Untagged order: number → "mb" → curve name. A plain string equal to
+        // "mb" MUST parse as MbSync; any other string is a curve name.
+        let s: SlotSpeed = serde_json::from_str(r#""mb""#).unwrap();
+        assert_eq!(s, SlotSpeed::MbSync);
+        let s: SlotSpeed = serde_json::from_str(r#""mbx""#).unwrap();
+        assert_eq!(s, SlotSpeed::Curve("mbx".into()));
+        // MbSync serializes as the bare string "mb"; the other shapes are unchanged.
+        assert_eq!(serde_json::to_string(&SlotSpeed::MbSync).unwrap(), r#""mb""#);
+        assert_eq!(serde_json::to_string(&SlotSpeed::Percent(40)).unwrap(), "40");
+        assert_eq!(serde_json::to_string(&SlotSpeed::Curve("cpu".into())).unwrap(), r#""cpu""#);
+    }
+
+    #[test]
+    fn mb_slots_roundtrip_through_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = Config::new();
+        cfg.devices.push(DeviceConfig {
+            mac: "49:8b:62:62:32:e1".into(),
+            name: None,
+            slots: [
+                SlotSpeed::MbSync,
+                SlotSpeed::MbSync,
+                SlotSpeed::MbSync,
+                SlotSpeed::Percent(0),
+            ],
+            color: None,
+            effect: None,
+        });
+        cfg.save(&path).unwrap();
+        // On-disk shape: the bare string "mb" (no tag, no object).
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#""mb""#), "slots must serialize as \"mb\": {text}");
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.devices[0].slots[0], SlotSpeed::MbSync);
+        assert_eq!(loaded.devices[0].slots[3], SlotSpeed::Percent(0));
+    }
+
+    #[test]
+    fn curve_named_mb_rejected() {
+        // "mb" is a reserved slot value; a curve by that name could never be
+        // referenced (the string parses as MbSync). Config-load and SetConfig
+        // share validate(), so neither path can create the collision.
+        let mut cfg = Config::new();
+        cfg.curves.push(Curve {
+            name: "mb".into(),
+            sensor: SensorSpec { hwmon_name: "k10temp".into(), input: "temp1_input".into() },
+            points: vec![(30.0, 20.0), (70.0, 100.0)],
+        });
+        assert!(cfg.validate().is_err(), "curve named \"mb\" must be rejected");
+        // ...and via the load path (the config-file variant of the same gate).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        cfg.save(&path).unwrap();
+        assert!(Config::load(&path).is_err(), "load must reject a curve named \"mb\"");
     }
 
     #[test]

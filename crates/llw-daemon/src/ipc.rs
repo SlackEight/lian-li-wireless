@@ -128,6 +128,15 @@ pub struct DeviceStatus {
     pub readback_pwm: [u8; 4],
     pub rgb_in_sync: Option<bool>,
     pub dropout_streak: u32,
+    /// "software" (daemon-commanded PWM) or "motherboard" (MB-sync sentinel;
+    /// speed is wire-driven). Additive envelope-v1 field — absent from older
+    /// daemons → defaults to "software".
+    #[serde(default = "default_speed_source")]
+    pub speed_source: String,
+}
+
+fn default_speed_source() -> String {
+    "software".to_string()
 }
 
 /// A request paired with its reply channel.
@@ -355,6 +364,19 @@ mod tests {
             "devices":[],"air":[],"pending":null}"#;
         let s: StatusData = serde_json::from_str(old).unwrap();
         assert!(s.curves.is_empty(), "missing curves field must default to empty");
+    }
+
+    #[test]
+    fn device_status_speed_source_is_additive() {
+        // Pre-M4f DeviceStatus JSON (no speed_source key) must still parse,
+        // defaulting to "software"; new daemons always emit the field.
+        let old = r#"{"mac":"02:8b:51:62:32:e1","kind":"SL-INF","channel":2,"fan_count":3,
+            "rpm":[0,0,0,0],"desired_pwm":[102,102,102,0],"readback_pwm":[102,102,102,0],
+            "rgb_in_sync":null,"dropout_streak":0}"#;
+        let d: DeviceStatus = serde_json::from_str(old).unwrap();
+        assert_eq!(d.speed_source, "software", "missing speed_source must default to software");
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["speed_source"], "software");
     }
 
     #[test]

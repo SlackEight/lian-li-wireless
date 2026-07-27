@@ -15,12 +15,28 @@ pub fn resolve_slots(dev: &DeviceConfig, curve_pct: &HashMap<String, f32>) -> [u
     for (i, slot) in dev.slots.iter().enumerate() {
         pwm[i] = match slot {
             SlotSpeed::Percent(pct) => percent_to_pwm(*pct as f32),
+            // Only reached in MIXED configs (mb_mode false): per-slot MB sync
+            // is not supported, so the slot resolves as off. The supervisor
+            // WARNs once per config application (build_runtimes).
+            SlotSpeed::MbSync => 0,
             SlotSpeed::Curve(name) => {
                 percent_to_pwm(curve_pct.get(name).copied().unwrap_or(0.0))
             }
         };
     }
     pwm
+}
+
+/// Device-level speed source (M4f): a device is motherboard-synced iff at
+/// least one slot is MbSync and NO slot commands a software speed
+/// (Percent > 0 or a curve). Trailing Percent(0) padding does not break MB
+/// mode; a mixed config is software mode (its MbSync slots resolve as 0).
+pub fn mb_mode(dev: &DeviceConfig) -> bool {
+    let any_mb = dev.slots.iter().any(|s| matches!(s, SlotSpeed::MbSync));
+    let any_soft = dev.slots.iter().any(|s| {
+        matches!(s, SlotSpeed::Percent(p) if *p > 0) || matches!(s, SlotSpeed::Curve(_))
+    });
+    any_mb && !any_soft
 }
 
 /// Upstream send rule: transmit when any slot drifted (|desired − readback| > 5,
@@ -60,6 +76,69 @@ mod tests {
         let mut pct = HashMap::new();
         pct.insert("cpu".to_string(), 34.0);
         assert_eq!(resolve_slots(&d, &pct), [86, 86, 255, 0]);
+    }
+
+    #[test]
+    fn mb_slots_resolve_to_zero_in_mixed_configs() {
+        let d = dev([
+            SlotSpeed::MbSync,
+            SlotSpeed::Percent(100),
+            SlotSpeed::Percent(0),
+            SlotSpeed::Percent(0),
+        ]);
+        assert_eq!(resolve_slots(&d, &HashMap::new()), [0, 255, 0, 0]);
+    }
+
+    #[test]
+    fn mb_mode_detection() {
+        assert!(mb_mode(&dev([
+            SlotSpeed::MbSync,
+            SlotSpeed::MbSync,
+            SlotSpeed::MbSync,
+            SlotSpeed::MbSync,
+        ])));
+        assert!(
+            mb_mode(&dev([
+                SlotSpeed::MbSync,
+                SlotSpeed::MbSync,
+                SlotSpeed::MbSync,
+                SlotSpeed::Percent(0),
+            ])),
+            "trailing Percent(0) padding must not break MB mode"
+        );
+        assert!(
+            !mb_mode(&dev([
+                SlotSpeed::MbSync,
+                SlotSpeed::Percent(40),
+                SlotSpeed::Percent(0),
+                SlotSpeed::Percent(0),
+            ])),
+            "a software-commanded percent slot forces software mode"
+        );
+        assert!(
+            !mb_mode(&dev([
+                SlotSpeed::MbSync,
+                SlotSpeed::Curve("cpu".into()),
+                SlotSpeed::Percent(0),
+                SlotSpeed::Percent(0),
+            ])),
+            "a curve slot forces software mode"
+        );
+        assert!(!mb_mode(&dev([
+            SlotSpeed::Percent(40),
+            SlotSpeed::Percent(40),
+            SlotSpeed::Percent(40),
+            SlotSpeed::Percent(0),
+        ])));
+        assert!(
+            !mb_mode(&dev([
+                SlotSpeed::Percent(0),
+                SlotSpeed::Percent(0),
+                SlotSpeed::Percent(0),
+                SlotSpeed::Percent(0),
+            ])),
+            "an all-off device is uncommanded, not MB-synced"
+        );
     }
 
     #[test]

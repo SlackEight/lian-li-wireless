@@ -47,6 +47,15 @@ const SURGE_NOTIFY_COOLDOWN: Duration = Duration::from_secs(60);
 const REVERT_BURST_REPEATS: usize = 4;
 const REVERT_BURST_GAP: Duration = Duration::from_millis(25);
 
+/// PWM sentinel that hands fan speed to the motherboard header (upstream
+/// `fan_controller.rs` MB-sync; M4f protocol findings 2026-07-20).
+const MB_SENTINEL: [u8; 4] = [6, 6, 6, 6];
+/// Sentinel cadence for MB-mode devices: sent once on entering the mode
+/// (fresh runtime → `last_sent` None) and then every 5s. No drift sends and
+/// no revert bursts — readback/RPM are wire-driven in MB mode and would
+/// false-positive both. Task 3's live validation may amend this to silence.
+const MB_SENTINEL_KEEPALIVE: Duration = Duration::from_secs(5);
+
 /// Failsafe engages when a sensor has been unreadable this long — or immediately if it has never produced a reading.
 const SENSOR_FAILSAFE_AFTER: Duration = Duration::from_secs(60);
 
@@ -405,11 +414,22 @@ impl<T: UsbIo> Supervisor<T> {
                     .map(|i| (i + 1) as u8)
                     .unwrap_or(1);
             }
-            let commanded = dev
-                .desired
+            // MB-mode devices (M4f): readback and RPM are wire-driven — the
+            // commanded PWM is a sentinel, not a speed. Feed every watchdog
+            // as uncommanded so BIOS-driven zero readbacks and RPM ramps
+            // produce zero dropout observations, surges, or stalls.
+            let mb = self
+                .cfg
+                .devices
                 .iter()
-                .take(rec.fan_count as usize)
-                .any(|&p| p > 0);
+                .find(|d| crate::config::parse_mac(&d.mac).is_ok_and(|m| m == rec.mac))
+                .is_some_and(fan::mb_mode);
+            let commanded = !mb
+                && dev
+                    .desired
+                    .iter()
+                    .take(rec.fan_count as usize)
+                    .any(|&p| p > 0);
             let readback_zero = rec.fan_count > 0
                 && rec
                     .current_pwm
@@ -438,7 +458,11 @@ impl<T: UsbIo> Supervisor<T> {
                 ms => ms,
             };
             let tail = crate::observation::tail_polls_for(poll_ms);
-            if let Some(surge) = dev.surge.observe(commanded, readback_zero, max_rpm, tail) {
+            if mb {
+                // Skip the tracker entirely (reset also clears any episode
+                // left in flight by a switch INTO MB mode mid-window).
+                dev.surge.reset();
+            } else if let Some(surge) = dev.surge.observe(commanded, readback_zero, max_rpm, tail) {
                 surges.push((rec.mac_str(), surge));
             }
 
@@ -544,6 +568,34 @@ impl<T: UsbIo> Supervisor<T> {
             let Ok(mac) = crate::config::parse_mac(&dc.mac) else { continue };
             let Some(dev) = self.devices.get_mut(&mac) else { continue };
             let Some(rec) = dev.last_record.clone() else { continue };
+            // MB-mode device (M4f): hand speed to the motherboard header via
+            // the sentinel — once on entering the mode (fresh runtime →
+            // last_sent None) and then every MB_SENTINEL_KEEPALIVE. No
+            // drift-triggered sends and no revert bursts: readback is
+            // wire-driven (reads 0) and would false-positive both. The raw
+            // sentinel is sent unconstrained (no min-duty clamping).
+            if fan::mb_mode(dc) {
+                dev.desired = MB_SENTINEL;
+                if due(dev.last_sent, now, MB_SENTINEL_KEEPALIVE) {
+                    let rf = pwm_frame(
+                        &mac,
+                        &link.master_mac,
+                        rec.rx_type,
+                        link.channel,
+                        dev.seq_index,
+                        &MB_SENTINEL,
+                    );
+                    let Some(dongle) = self.dongle.as_mut() else { return sent };
+                    if let Err(e) = dongle.send_rf_frame(&rf, rec.channel, rec.rx_type) {
+                        warn!("MB sentinel send failed for {}: {e}", rec.mac_str());
+                        self.drop_dongle();
+                        return sent;
+                    }
+                    dev.last_sent = Some(now);
+                    sent += 1;
+                }
+                continue;
+            }
             // Skip curve-driven devices until their curve has produced output.
             if dc.slots.iter().any(|s| matches!(s, SlotSpeed::Curve(n) if !curve_pct.contains_key(n))) {
                 continue;
@@ -777,6 +829,12 @@ impl<T: UsbIo> Supervisor<T> {
                         .values()
                         .map(|d| {
                             let rec = d.last_record.as_ref();
+                            let mb = self
+                                .cfg
+                                .devices
+                                .iter()
+                                .find(|c| crate::config::parse_mac(&c.mac).is_ok_and(|m| m == d.mac))
+                                .is_some_and(fan::mb_mode);
                             DeviceStatus {
                                 mac: mac_str(&d.mac),
                                 kind: rec.map_or("?".into(), |r| r.kind.display_name().into()),
@@ -790,6 +848,8 @@ impl<T: UsbIo> Supervisor<T> {
                                     _ => None,
                                 },
                                 dropout_streak: d.filter.streak(),
+                                speed_source: if mb { "motherboard" } else { "software" }
+                                    .to_string(),
                             }
                         })
                         .collect(),
@@ -902,7 +962,60 @@ impl<T: UsbIo> Supervisor<T> {
                 };
                 match &air_entry.bond {
                     Bond::Foreign => return ResponseEnvelope::err("bound to another controller — unbind it there first"),
-                    Bond::Ours => return ResponseEnvelope::err("already bound"),
+                    Bond::Ours => {
+                        let configured = self
+                            .cfg
+                            .devices
+                            .iter()
+                            .any(|d| crate::config::parse_mac(&d.mac).is_ok_and(|m| m == mac_bytes));
+                        if configured {
+                            return ResponseEnvelope::err("already bound");
+                        }
+                        // Adopt-on-Bind (M4f): the set is already RF-paired to
+                        // our master but absent from config (paired by hand or
+                        // config loss). Enroll it synchronously with
+                        // uncommanded Percent(0) slots — the owner picks a
+                        // speed mode in the UI. No RF traffic, no pending op.
+                        // Clone-mutate-save-swap so a failed save leaves
+                        // self.cfg untouched (SetEffect pattern).
+                        let mut new_cfg = self.cfg.clone();
+                        new_cfg.devices.push(crate::config::DeviceConfig {
+                            mac: mac_str(&mac_bytes),
+                            name: None,
+                            slots: [
+                                SlotSpeed::Percent(0),
+                                SlotSpeed::Percent(0),
+                                SlotSpeed::Percent(0),
+                                SlotSpeed::Percent(0),
+                            ],
+                            color: None,
+                            effect: None,
+                        });
+                        if let Err(e) = new_cfg.save(&self.config_path) {
+                            return ResponseEnvelope::err(format!("save failed: {e}"));
+                        }
+                        self.cfg = new_cfg;
+                        // Runtime entry so the device is polled, commanded,
+                        // and visible in Status (same shape as the
+                        // bind-convergence insert).
+                        self.devices.insert(
+                            mac_bytes,
+                            DeviceRuntime {
+                                mac: mac_bytes,
+                                desired: [0; 4],
+                                last_sent: None,
+                                filter: DropoutFilter::default(),
+                                expected_fx: None,
+                                last_rgb_upload: None,
+                                last_record: None,
+                                surge: Default::default(),
+                                stall: Default::default(),
+                                seq_index: 1,
+                            },
+                        );
+                        info!("adopted paired-but-unconfigured device {}", mac_str(&mac_bytes));
+                        return ResponseEnvelope::ok(Some(serde_json::json!({"state": "adopted"})));
+                    }
                     Bond::Unbound => {}
                 }
                 if let Some(op) = &self.pending_op {
@@ -1212,6 +1325,14 @@ fn build_runtimes(cfg: &Config) -> (HashMap<String, CurveRuntime>, HashMap<[u8; 
     }
     let mut devices = HashMap::new();
     for d in &cfg.devices {
+        // Mixed mb/software slots: per-slot MB sync isn't supported — the
+        // MbSync slots resolve as 0%. WARN once per config application.
+        if d.slots.iter().any(|s| matches!(s, SlotSpeed::MbSync)) && !fan::mb_mode(d) {
+            warn!(
+                "device {}: mixed \"mb\"/software slots — the \"mb\" slots resolve as 0% (per-slot MB sync is not supported)",
+                d.mac
+            );
+        }
         if let Ok(mac) = crate::config::parse_mac(&d.mac) {
             devices.insert(
                 mac,
@@ -3362,5 +3483,281 @@ mod tests {
             frames_of_kind(&all[mark..], 0x10, Some(&BIND_MAC)).is_empty(),
             "NO bind frames may be transmitted at a foreign-bound device"
         );
+    }
+
+    // ── M4f: MB-sync speed source + adopt-on-Bind ─────────────────────────────
+
+    /// Config with the standard device fully MB-synced (trailing Percent(0)
+    /// padding, per the UI's all-active-slots-to-"mb" mutation).
+    fn mb_mode_config() -> Config {
+        let mut cfg = Config::new();
+        cfg.devices.push(DeviceConfig {
+            mac: "02:8b:51:62:32:e1".into(),
+            name: None,
+            slots: [
+                SlotSpeed::MbSync,
+                SlotSpeed::MbSync,
+                SlotSpeed::MbSync,
+                SlotSpeed::Percent(0),
+            ],
+            color: None,
+            effect: None,
+        });
+        cfg.observation.poll_ms = 0; // poll every step
+        cfg.control.tick_ms = 0; // fan tick every step
+        cfg
+    }
+
+    /// MB mode: one [6,6,6,6] sentinel frame on entering the mode, then one
+    /// every MB_SENTINEL_KEEPALIVE — no drift sends and no REVERT_BURST even
+    /// though readback stays all-zero (which in software mode triggers both
+    /// on every tick).
+    #[test]
+    fn mb_mode_sends_sentinel_then_stays_quiet() {
+        /// Chunk-0 packets of PWM frames addressed to MAC; packet[21..25]
+        /// carries rf[17..21] = the PWM bytes.
+        fn sentinel_frames(writes: &[Vec<u8>]) -> Vec<Vec<u8>> {
+            writes
+                .iter()
+                .filter(|w| {
+                    w.len() == 64
+                        && w[0] == 0x10
+                        && w[1] == 0
+                        && w[4] == 0x12
+                        && w[5] == 0x10
+                        && w[6..12] == MAC
+                })
+                .cloned()
+                .collect()
+        }
+
+        let mut cfg = mb_mode_config();
+        cfg.control.keepalive_ms = 0; // would keepalive every step in software mode
+
+        // Wire-driven records: readback all-zero, RPM tracking the BIOS header.
+        let rec = record_bytes_rpm([0; 4], [0; 4], [905, 910, 900, 0]);
+        let script = vec![getdev_resp(&[rec]); 12];
+        let dir = tempfile::tempdir().unwrap();
+        let (mut sup, _ipc, tx, t0) =
+            sim_with_ipc_shared_tx(cfg, script, dir.path().join("config.json"));
+
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+
+        // First fan tick: exactly ONE sentinel frame — zero readback must not
+        // trigger a REVERT_BURST in MB mode.
+        let out = sup.step(t0 + Duration::from_secs(1));
+        assert_eq!(out.sent_pwm, 1, "entering MB mode must send the sentinel once");
+        let frames = sentinel_frames(&tx.written());
+        assert_eq!(frames.len(), 1, "single frame, not a revert burst");
+        assert_eq!(&frames[0][21..25], &MB_SENTINEL, "PWM payload must be the [6,6,6,6] sentinel");
+        assert_eq!(
+            sup.devices.get(&MAC).unwrap().desired,
+            MB_SENTINEL,
+            "desired must reflect the sentinel"
+        );
+
+        // Inside the 5s sentinel keepalive: fully quiet despite per-step
+        // ticks, zero readback, and keepalive_ms=0.
+        for s in 2u64..=5 {
+            let out = sup.step(t0 + Duration::from_secs(s));
+            assert_eq!(out.sent_pwm, 0, "no PWM churn at +{s}s (MB mode)");
+        }
+        assert_eq!(sentinel_frames(&tx.written()).len(), 1, "still one frame before the 5s mark");
+
+        // 5s past the first send: the sentinel keepalive fires, again single-frame.
+        let out = sup.step(t0 + Duration::from_secs(6));
+        assert_eq!(out.sent_pwm, 1, "sentinel keepalive at +6s");
+        let frames = sentinel_frames(&tx.written());
+        assert_eq!(frames.len(), 2);
+        assert_eq!(&frames[1][21..25], &MB_SENTINEL);
+    }
+
+    /// MB mode silences the reliability machinery for the device: sustained
+    /// zero readback yields NO dropout observations and BIOS RPM ramps yield
+    /// NO surges (in software mode this exact script would produce both).
+    #[test]
+    fn mb_mode_suppresses_dropout_and_surge_watchdogs() {
+        let low = record_bytes_rpm([0; 4], [0; 4], [730, 728, 733, 0]);
+        let high = record_bytes_rpm([0; 4], [0; 4], [2100, 2080, 2090, 0]);
+        let mut script = vec![getdev_resp(&[low]); 3];
+        script.extend(vec![getdev_resp(&[high]); 12]);
+        let (mut sup, t0) = sim(mb_mode_config(), script);
+
+        for i in 0..15 {
+            let _ = sup.step(t0 + Duration::from_secs(i + 1));
+        }
+        let t = sup.telemetry();
+        assert_eq!(t.total_dropouts, 0, "zero readback in MB mode is not a dropout");
+        assert_eq!(t.total_surges, 0, "a BIOS ramp in MB mode is not a surge");
+        assert_eq!(t.total_stalls, 0);
+        assert_eq!(
+            sup.devices.get(&MAC).unwrap().filter.streak(),
+            0,
+            "the dropout filter must be fed as uncommanded"
+        );
+    }
+
+    /// Mixed mb/software slots are software mode: the MbSync slot resolves as
+    /// 0% and the device follows the normal send policy.
+    #[test]
+    fn mixed_mb_slots_run_in_software_mode() {
+        let mut cfg = mb_mode_config();
+        cfg.devices[0].slots = [
+            SlotSpeed::MbSync,
+            SlotSpeed::Percent(40),
+            SlotSpeed::Percent(40),
+            SlotSpeed::Percent(0),
+        ];
+        let rec = record_bytes([0, 102, 102, 0], [0; 4]);
+        let script = vec![getdev_resp(&[rec]); 4];
+        let (mut sup, t0) = sim(cfg, script);
+
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+        let out = sup.step(t0 + Duration::from_secs(1));
+        assert_eq!(out.sent_pwm, 1, "software-mode send policy applies");
+        assert_eq!(
+            sup.devices.get(&MAC).unwrap().desired,
+            [0, 102, 102, 0],
+            "the mb slot must resolve as 0%, the percent slots as 40%"
+        );
+    }
+
+    /// Adopt-on-Bind: an Ours-bonded set missing from config (paired by hand
+    /// or config loss) is enrolled synchronously by Bind — config entry with
+    /// uncommanded Percent(0) slots, ok reply, NO pending op, and NO RF
+    /// traffic (no bind burst, no on-air save-config).
+    #[test]
+    fn adopt_on_bind_enrolls_paired_unconfigured_device() {
+        const ADOPT_MAC: [u8; 6] = [0x49, 0x8b, 0x62, 0x62, 0x32, 0xe1];
+        let rec_ours = air_record_bytes(MAC, MASTER, [0; 4]);
+        let rec_adopt = {
+            let mut r = air_record_bytes(ADOPT_MAC, MASTER, [0; 4]);
+            r[13] = 2; // its own rx slot
+            r
+        };
+        let combined = getdev_resp_multi(&[rec_ours, rec_adopt]);
+        let script = vec![combined; 8];
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let (mut sup, ipc_tx, tx, t0) =
+            sim_with_ipc_shared_tx(bind_test_config(), script, config_path.clone());
+
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+        assert_eq!(sup.air.get(&ADOPT_MAC).unwrap().bond, Bond::Ours, "target must classify Ours");
+        assert!(!sup.cfg.devices.iter().any(|d| d.mac == "49:8b:62:62:32:e1"));
+
+        // Burn the first-run fan tick at t0+1s so the adoption step's frame
+        // window (tick_ms 10s) contains no unrelated PWM keepalives.
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        let mark = tx.written().len();
+
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "49:8b:62:62:32:e1".into() },
+            reply: reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(2));
+        let resp = reply_rx.try_recv().unwrap();
+        assert!(resp.ok, "adoption must reply ok: {:?}", resp.error);
+        assert_eq!(
+            resp.data.as_ref().and_then(|v| v.get("state")).and_then(|v| v.as_str()),
+            Some("adopted")
+        );
+        assert!(sup.pending_op.is_none(), "adoption must not create a pending op");
+
+        // Config gains the device with Percent(0) slots — in memory and on disk.
+        let saved = crate::config::Config::load(&config_path).unwrap();
+        let dc = saved
+            .devices
+            .iter()
+            .find(|d| d.mac == "49:8b:62:62:32:e1")
+            .expect("adopted entry must be saved");
+        assert!(
+            dc.slots.iter().all(|s| *s == SlotSpeed::Percent(0)),
+            "adopted slots must be uncommanded Percent(0), got {:?}",
+            dc.slots
+        );
+        assert!(dc.name.is_none() && dc.color.is_none() && dc.effect.is_none());
+        assert!(sup.devices.contains_key(&ADOPT_MAC), "runtime must exist after adoption");
+
+        // NO RF traffic from the adoption: no bind/PWM frames at the mac, no
+        // save-config anywhere (heartbeats are a different kind, 0x14).
+        let all = tx.written();
+        assert!(
+            frames_of_kind(&all[mark..], 0x10, Some(&ADOPT_MAC)).is_empty(),
+            "adoption must not transmit any bind burst"
+        );
+        assert!(
+            frames_of_kind(&all[mark..], 0x15, None).is_empty(),
+            "adoption must not transmit an on-air save-config"
+        );
+
+        // Now that the device IS configured, the historic Ours refusal returns.
+        let (reply_tx2, reply_rx2) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Bind { mac: "49:8b:62:62:32:e1".into() },
+            reply: reply_tx2,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(3));
+        let resp2 = reply_rx2.try_recv().unwrap();
+        assert!(!resp2.ok, "a configured Ours device must still be refused");
+        assert!(
+            resp2.error.as_ref().unwrap().contains("already bound"),
+            "got: {:?}",
+            resp2.error
+        );
+    }
+
+    /// Status reports each configured device's speed source, derived from its
+    /// slots: "software" for Percent/Curve, "motherboard" for all-MbSync.
+    #[test]
+    fn status_reports_speed_source() {
+        let second_mac: [u8; 6] = [0x02, 0x8b, 0x51, 0x62, 0x32, 0xe2];
+        let mut cfg = bind_test_config(); // MAC with Percent(40) slots
+        cfg.devices.push(DeviceConfig {
+            mac: "02:8b:51:62:32:e2".into(),
+            name: None,
+            slots: [
+                SlotSpeed::MbSync,
+                SlotSpeed::MbSync,
+                SlotSpeed::MbSync,
+                SlotSpeed::Percent(0),
+            ],
+            color: None,
+            effect: None,
+        });
+
+        let rec_a = air_record_bytes(MAC, MASTER, [0; 4]);
+        let rec_b = air_record_bytes(second_mac, MASTER, [0; 4]);
+        let script = vec![getdev_resp_multi(&[rec_a, rec_b]); 6];
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut sup, ipc_tx, t0) = sim_with_ipc(cfg, script, tmp.path().join("config.json"));
+
+        let out = sup.step(t0);
+        assert!(out.acquired, "must acquire");
+
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        ipc_tx.send(crate::ipc::IpcCmd {
+            req: crate::ipc::Request::Status,
+            reply: reply_tx,
+        }).unwrap();
+        let _ = sup.step(t0 + Duration::from_secs(1));
+        let resp = reply_rx.try_recv().unwrap();
+        assert!(resp.ok, "{:?}", resp.error);
+        let data = resp.data.unwrap();
+        let devices = data["devices"].as_array().unwrap();
+        assert_eq!(devices.len(), 2);
+        let by_mac = |mac: &str| {
+            devices
+                .iter()
+                .find(|d| d["mac"] == mac)
+                .unwrap_or_else(|| panic!("{mac} must be in status"))
+        };
+        assert_eq!(by_mac("02:8b:51:62:32:e1")["speed_source"], "software");
+        assert_eq!(by_mac("02:8b:51:62:32:e2")["speed_source"], "motherboard");
     }
 }
