@@ -325,7 +325,7 @@ canvas{display:block}
 
         <div class="isect">
           <h3>Strimers <em>max two</em></h3>
-          <button class="tgl" id="tglMB"><span class="bx">✓</span><span class="tx"><b>Motherboard 24-pin</b><span>across to the glass, then back behind the tray</span></span><span class="n">132</span></button>
+          <button class="tgl" id="tglMB"><span class="bx">✓</span><span class="tx"><b>Motherboard 24-pin</b><span>flat semicircle out to the glass and round to the board</span></span><span class="n">132</span></button>
           <button class="tgl" id="tglGPU"><span class="bx">✓</span><span class="tx"><b>GPU</b><span>around the card and up its left flank, edge-on from the front</span></span><span class="n">116</span></button>
         </div>
 
@@ -648,7 +648,7 @@ const MOUNT_ORDER=['front','top','rear','side','bottom'];
 
 /* 24-pin: out of the board's front edge, then down the tray edge on the
    RIGHT, in the channel between the card's inboard edge and the tray */
-const STRIMER_MB_PATH = [[78,406,8],[30,424,78],[-34,410,142],[-40,352,150],[20,318,120],[86,306,64],[104,298,6]];
+const STRIMER_MB_PATH = [[84.0,365.0,80.0],[64.9,365.0,76.2],[48.6,365.0,65.4],[37.8,365.0,49.1],[34.0,365.0,30.0],[37.8,365.0,10.9],[48.6,365.0,-5.4],[64.9,365.0,-16.2],[84.0,365.0,-20.0]];
 /* GPU: up out of the bottom of the case, forward along the floor, up in
    FRONT of the card, then back over its top edge to the power connectors.
    No shroud is asserted — we cannot know if this build has one. */
@@ -835,7 +835,7 @@ function buildScene(){
     const n=state.counts[m];
     if(n>0) devices.push(makeFanDevice(m,n, MOUNTS[m].nm + (n>1? ' ×'+n:'')));
   }
-  if(state.strimerMB)  devices.push(makeRibbonDevice('strMB','Strimer · 24-pin',STRIMER_MB_PATH,12,11,62,[1,0,0]));
+  if(state.strimerMB)  devices.push(makeRibbonDevice('strMB','Strimer · 24-pin',STRIMER_MB_PATH,12,11,62,[0,0,-1]));
   if(state.strimerGPU) devices.push(makeRibbonDevice('strGPU','Strimer · GPU',STRIMER_GPU_PATH,4,29,44,[0,1,0]));
   /* centroid + world span, for spill and hit-testing */
   for(const d of devices){
