@@ -326,7 +326,7 @@ canvas{display:block}
         <div class="isect">
           <h3>Strimers <em>max two</em></h3>
           <button class="tgl" id="tglMB"><span class="bx">✓</span><span class="tx"><b>Motherboard 24-pin</b><span>across to the glass, then back behind the tray</span></span><span class="n">132</span></button>
-          <button class="tgl" id="tglGPU"><span class="bx">✓</span><span class="tx"><b>GPU</b><span>up from under the board, 90&deg; into the card</span></span><span class="n">116</span></button>
+          <button class="tgl" id="tglGPU"><span class="bx">✓</span><span class="tx"><b>GPU</b><span>quarter circle up to the card, edge-on from the front</span></span><span class="n">116</span></button>
         </div>
 
         <div class="isect">
@@ -652,7 +652,15 @@ const STRIMER_MB_PATH = [[78,406,8],[30,424,78],[-34,410,142],[-40,352,150],[20,
 /* GPU: up out of the bottom of the case, forward along the floor, up in
    FRONT of the card, then back over its top edge to the power connectors.
    No shroud is asserted — we cannot know if this build has one. */
-const STRIMER_GPU_PATH= [[72,118,-44],[58,138,26],[38,176,74],[20,232,92],[12,286,74],[13,302,44],[16,302,4]];
+/* GPU cable, per the owner's measurement of their own build: a QUARTER
+   CIRCLE lying in one constant-Z plane — the plane the front camera looks
+   straight at. It leaves the bottom edge of the board travelling LEFT with
+   its wide face parallel to the floor, sweeps left-and-up through 90 deg,
+   and arrives at the side of the GPU travelling straight UP with its wide
+   face parallel to the side panel.  Because the whole curve lives in one
+   XY plane and the ribbon's width runs along Z, the cable is edge-on from
+   the front at EVERY point: "you only ever see it side on". */
+const STRIMER_GPU_PATH= [[84.0,150.0,-40.0],[62.0,152.9,-40.0],[41.5,161.4,-40.0],[23.9,174.9,-40.0],[10.4,192.5,-40.0],[1.9,213.0,-40.0],[-1.0,235.0,-40.0]];
 
 /* =====================================================================
    5 · SCENE BUILD
@@ -828,7 +836,7 @@ function buildScene(){
     if(n>0) devices.push(makeFanDevice(m,n, MOUNTS[m].nm + (n>1? ' ×'+n:'')));
   }
   if(state.strimerMB)  devices.push(makeRibbonDevice('strMB','Strimer · 24-pin',STRIMER_MB_PATH,12,11,62,[1,0,0]));
-  if(state.strimerGPU) devices.push(makeRibbonDevice('strGPU','Strimer · GPU',STRIMER_GPU_PATH,4,29,30,[0,0,-1]));
+  if(state.strimerGPU) devices.push(makeRibbonDevice('strGPU','Strimer · GPU',STRIMER_GPU_PATH,4,29,44,[0,1,0]));
   /* centroid + world span, for spill and hit-testing */
   for(const d of devices){
     let cx=0,cy=0,cz=0, n=d.pts3.length/3;
