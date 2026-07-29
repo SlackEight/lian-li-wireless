@@ -325,8 +325,8 @@ canvas{display:block}
 
         <div class="isect">
           <h3>Strimers <em>max two</em></h3>
-          <button class="tgl" id="tglMB"><span class="bx">✓</span><span class="tx"><b>Motherboard 24-pin</b><span>down the tray edge, on the right</span></span><span class="n">132</span></button>
-          <button class="tgl" id="tglGPU"><span class="bx">✓</span><span class="tx"><b>GPU</b><span>along the floor, up to the card</span></span><span class="n">116</span></button>
+          <button class="tgl" id="tglMB"><span class="bx">✓</span><span class="tx"><b>Motherboard 24-pin</b><span>across to the glass, then back behind the tray</span></span><span class="n">132</span></button>
+          <button class="tgl" id="tglGPU"><span class="bx">✓</span><span class="tx"><b>GPU</b><span>up from under the board, 90&deg; into the card</span></span><span class="n">116</span></button>
         </div>
 
         <div class="isect">
@@ -635,8 +635,8 @@ const MOUNTS = {
           sub:'under the 63 mm roof space · exhaust',
           pos:i=>[0, Y1-63+FAN_T/2, -138+i*FAN_MM]},
   bottom:{max:1, nm:'Floor', air:'intake',  U:[1,0,0],  V:[0,0,-1], N:[0,1,0],
-          sub:'one position, centred on the base · intake',
-          pos:i=>[0, Y0+FAN_T/2+15, 0]},
+          sub:'front of the base, in line with the side mount · intake',
+          pos:i=>[0, Y0+FAN_T/2+15, 158]},
   front: {max:3, nm:'Front', air:'intake',  U:[-1,0,0], V:[0,1,0],  N:[0,0,-1],
           sub:'front intake — for cases that have one',
           pos:i=>[0, 150+i*FAN_MM, Z1-FAN_T/2-19]},
@@ -648,11 +648,11 @@ const MOUNT_ORDER=['front','top','rear','side','bottom'];
 
 /* 24-pin: out of the board's front edge, then down the tray edge on the
    RIGHT, in the channel between the card's inboard edge and the tray */
-const STRIMER_MB_PATH = [[80,384,14],[88,338,44],[87,262,60],[89,186,50],[92,126,20],[90,96,-40]];
+const STRIMER_MB_PATH = [[78,406,8],[30,424,78],[-34,410,142],[-40,352,150],[20,318,120],[86,306,64],[104,298,6]];
 /* GPU: up out of the bottom of the case, forward along the floor, up in
    FRONT of the card, then back over its top edge to the power connectors.
    No shroud is asserted — we cannot know if this build has one. */
-const STRIMER_GPU_PATH= [[72,26,-172],[58,32,-72],[40,38,26],[20,92,88],[10,182,98],[12,258,72],[24,300,28]];
+const STRIMER_GPU_PATH= [[72,118,-44],[58,138,26],[38,176,74],[20,232,92],[12,286,74],[13,302,44],[16,302,4]];
 
 /* =====================================================================
    5 · SCENE BUILD
@@ -804,7 +804,7 @@ function buildScene(){
     if(n>0) devices.push(makeFanDevice(m,n, MOUNTS[m].nm + (n>1? ' ×'+n:'')));
   }
   if(state.strimerMB)  devices.push(makeRibbonDevice('strMB','Strimer · 24-pin',STRIMER_MB_PATH,12,11,62,[1,0,0]));
-  if(state.strimerGPU) devices.push(makeRibbonDevice('strGPU','Strimer · GPU',STRIMER_GPU_PATH,4,29,30,[1,0,0]));
+  if(state.strimerGPU) devices.push(makeRibbonDevice('strGPU','Strimer · GPU',STRIMER_GPU_PATH,4,29,30,[0,0,-1]));
   /* centroid + world span, for spill and hit-testing */
   for(const d of devices){
     let cx=0,cy=0,cz=0, n=d.pts3.length/3;
