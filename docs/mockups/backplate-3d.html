@@ -769,10 +769,34 @@ function makeRibbonDevice(id,nm,path,strands,per,width,guide){
   for(let i=0;i<per;i++){
     const a=spine[Math.max(0,i-1)], b=spine[Math.min(per-1,i+1)];
     let tx=b[0]-a[0], ty=b[1]-a[1], tz=b[2]-a[2];
-    const L=Math.hypot(tx,ty,tz)||1; tx/=L; ty/=L; tz/=L;
-    let wx=guide[1]*tz-guide[2]*ty, wy=guide[2]*tx-guide[0]*tz, wz=guide[0]*ty-guide[1]*tx;
-    const wl=Math.hypot(wx,wy,wz)||1;
-    W.push([wx/wl,wy/wl,wz/wl]); T.push([tx,ty,tz]);
+    const L=Math.hypot(tx,ty,tz)||1;
+    T.push([tx/L,ty/L,tz/L]);
+  }
+  /* PARALLEL-TRANSPORT the width vector along the spine.  The old
+     `guide x tangent` degenerates to zero wherever the cable happens to run
+     parallel to the guide, and flips sign either side of it — which made the
+     strands splay open like a hand of cards instead of staying parallel the
+     way a real ribbon cable does.  Seed once from the guide, then carry the
+     frame forward by projecting out each new tangent: stable everywhere, and
+     the ribbon keeps a consistent face through arbitrary curves. */
+  {
+    const t0=T[0];
+    let w=[guide[1]*t0[2]-guide[2]*t0[1], guide[2]*t0[0]-guide[0]*t0[2], guide[0]*t0[1]-guide[1]*t0[0]];
+    let wl=Math.hypot(w[0],w[1],w[2]);
+    if(wl<1e-4){                                  /* guide parallel to tangent */
+      const alt = Math.abs(t0[1])<0.9 ? [0,1,0] : [1,0,0];
+      w=[alt[1]*t0[2]-alt[2]*t0[1], alt[2]*t0[0]-alt[0]*t0[2], alt[0]*t0[1]-alt[1]*t0[0]];
+      wl=Math.hypot(w[0],w[1],w[2])||1;
+    }
+    W.push([w[0]/wl,w[1]/wl,w[2]/wl]);
+    for(let i=1;i<per;i++){
+      const t=T[i], q=W[i-1];
+      const d=q[0]*t[0]+q[1]*t[1]+q[2]*t[2];
+      let n=[q[0]-t[0]*d, q[1]-t[1]*d, q[2]-t[2]*d];
+      let nl=Math.hypot(n[0],n[1],n[2]);
+      if(nl<1e-4){ W.push(q.slice()); continue; }
+      W.push([n[0]/nl,n[1]/nl,n[2]/nl]);
+    }
   }
   for(let s=0;s<strands;s++){
     const off=(strands===1?0:(s/(strands-1)-0.5))*width;
