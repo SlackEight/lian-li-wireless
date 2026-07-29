@@ -116,6 +116,7 @@ canvas{display:block}
   box-shadow:inset 0 0 0 1px rgba(255,255,255,.022);cursor:grab}
 .stage-wrap.drag{cursor:grabbing}
 .stage-wrap.marq{cursor:crosshair}
+.stage-wrap.pick{cursor:pointer}
 #stage{position:absolute;inset:0;width:100%;height:100%}
 .view-bar{position:absolute;left:16px;top:14px;display:flex;gap:6px;z-index:3}
 .vb{height:28px;padding:0 12px;border-radius:8px;border:1px solid var(--hairline);
@@ -124,8 +125,11 @@ canvas{display:block}
 .vb:hover{color:var(--text-dim);border-color:rgba(255,255,255,.14)}
 .vb.on{color:var(--text);background:rgba(255,255,255,.07);border-color:var(--hairline-strong)}
 .vb.rst{margin-left:6px}
-.hud{position:absolute;right:16px;top:16px;text-align:right;color:#5f5f6b;font-size:10.5px;
-  letter-spacing:.07em;line-height:1.7;pointer-events:none;z-index:3;text-transform:uppercase}
+.hud{position:absolute;right:16px;top:14px;text-align:right;pointer-events:none;z-index:3;
+  text-transform:uppercase;letter-spacing:.1em}
+.hud .hv{color:var(--text);font-size:12px;font-weight:500;line-height:1.4}
+.hud .hw{color:var(--text-muted);font-size:10.5px;line-height:1.6}
+.hud .hn{color:#5f5f6b;font-size:10px;line-height:1.7;letter-spacing:.07em;margin-top:3px}
 .transport{flex:none;height:40px;display:flex;align-items:center;justify-content:center;gap:18px;
   color:var(--text-muted);font-size:11px;letter-spacing:.06em}
 .transport b{font-weight:450;color:var(--text-dim)}
@@ -152,10 +156,14 @@ canvas{display:block}
   box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
 .seg button .sw2{width:11px;height:11px;border-radius:3px;border:1px solid rgba(255,255,255,.28)}
 
-.mrow{display:grid;grid-template-columns:1fr auto;align-items:center;gap:10px;height:38px}
-.mrow .lb{display:flex;flex-direction:column;justify-content:center}
-.mrow .lb b{font-weight:500;font-size:12px;color:var(--text-dim);letter-spacing:.02em}
-.mrow .lb span{font-size:10.5px;color:#6c6c78;letter-spacing:.02em}
+.mrow{display:grid;grid-template-columns:1fr auto;align-items:center;gap:10px;height:40px}
+.mrow .lb{display:flex;flex-direction:column;justify-content:center;min-width:0}
+.mrow .lb b{font-weight:500;font-size:12px;color:var(--text-dim);letter-spacing:.02em;
+  display:flex;align-items:baseline;gap:7px}
+.mrow .lb b i{font-style:normal;font-size:9.5px;letter-spacing:.06em;color:#5f5f6b;
+  border:1px solid var(--hairline);border-radius:4px;padding:1px 4px;line-height:1.25}
+.mrow .lb span{font-size:10.5px;color:#6c6c78;letter-spacing:.02em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .step{display:flex;align-items:center;gap:2px;border:1px solid var(--hairline);border-radius:9px;
   height:32px;padding:0 2px;background:var(--surface-2)}
 .step button{width:26px;height:28px;border-radius:7px;color:var(--text-muted);font-size:14px;line-height:1;
@@ -283,13 +291,18 @@ canvas{display:block}
           <button class="vb" data-view="rear">Rear</button>
           <button class="vb rst" id="resetView">Reset view</button>
         </div>
-        <div class="hud" id="hud"></div>
+        <div class="hud">
+          <div class="hv" id="hudView"></div>
+          <div class="hw" id="hudWhere"></div>
+          <div class="hn" id="hudNum"></div>
+        </div>
       </div>
 
       <div class="transport">
         <span>drag <b>orbit</b></span><span>scroll <b>zoom</b></span>
-        <span>click <b>select</b></span><span>right-drag <b>marquee</b></span>
-        <span id="tpFps"></span>
+        <span>click a fan to <b>select</b></span>
+        <span>click a dashed mount to <b>add fans</b></span>
+        <span>right-drag <b>marquee</b></span>
       </div>
     </section>
 
@@ -305,20 +318,20 @@ canvas{display:block}
         </div>
 
         <div class="isect">
-          <h3>Mounts <em>SL-INF · 44 LEDs per fan</em></h3>
+          <h3>Mounts <em>SL-INF 120 · 44 LEDs each</em></h3>
           <div id="mountRows"></div>
           <div class="tot"><span id="totLeft"></span><span id="totRight"></span></div>
         </div>
 
         <div class="isect">
           <h3>Strimers <em>max two</em></h3>
-          <button class="tgl" id="tglMB"><span class="bx">✓</span><span class="tx"><b>Motherboard 24-pin</b><span>down the tray edge</span></span><span class="n">132</span></button>
-          <button class="tgl" id="tglGPU"><span class="bx">✓</span><span class="tx"><b>GPU</b><span>across the shroud to the card</span></span><span class="n">116</span></button>
+          <button class="tgl" id="tglMB"><span class="bx">✓</span><span class="tx"><b>Motherboard 24-pin</b><span>down the tray edge, on the right</span></span><span class="n">132</span></button>
+          <button class="tgl" id="tglGPU"><span class="bx">✓</span><span class="tx"><b>GPU</b><span>along the floor, up to the card</span></span><span class="n">116</span></button>
         </div>
 
         <div class="isect">
           <button id="loadRig">Load my rig</button>
-          <div class="subline">Five wireless devices, placed the way they physically sit: a 3-fan SL-INF set on top, singles at rear and front, both Strimers.</div>
+          <div class="subline">Five wireless devices, placed the way they physically sit: an interlocked 3-fan SL-INF set under the roof, singles at the rear and side, both Strimers.</div>
         </div>
 
         <div class="isect">
@@ -387,10 +400,46 @@ const PALETTES = [
   {id:'aurora', nm:'Aurora',      cols:['#00FF9D','#2E6BFF','#B14BFF','#06202A']}
 ];
 
-/* interior of a mid-tower, in millimetres.  x right · y up · z front */
-const CW=252, CH=480, CD=470;
+/* =====================================================================
+   THE CASE, in millimetres.   x right · y up · z front
+   Proportions are a Phanteks NV5: 239 W × 477 D × 528 H, 3×120 roof,
+   3×120 side, 1×120 rear, 1×120 floor, 63 mm of roof radiator space,
+   440 mm of GPU clearance, E-ATX capable.
+   HANDEDNESS — viewed from the FRONT (+Z) of a standard ATX tower the
+   rear I/O and the motherboard tray are on the RIGHT (+X), the main
+   glass panel is the LEFT (−X), and the cable channel is behind the
+   tray between it and the right side panel.
+   ===================================================================== */
+const CW=239, CH=528, CD=477;
 const X0=-CW/2, X1=CW/2, Y0=0, Y1=CH, Z0=-CD/2, Z1=CD/2;
-const FR = 52;                 /* fan outer radius: 1.15*2*52 ≈ 120 mm frame */
+
+/* Lian Li UNI FAN SL-INF 120: 120 × 122.1 × 25 mm.  Modules interlock
+   edge to edge, so a trio is one rigid 360 mm assembly, not three fans
+   with air between them. */
+const FAN_MM=120, FAN_W=122.1, FAN_T=25;
+const FR = FAN_MM/2.3;             /* LED radius unit: 1.15·2·FR = 120 mm */
+const RU = (FAN_W/2)/FR;           /* frame half-extent across the chain  */
+const RV = (FAN_MM/2)/FR;          /* frame half-extent along the chain   */
+const SCREW = 52.5/FR;             /* 105 mm screw square, fan-local      */
+
+/* the right-hand interior wall and everything bolted to it */
+const TRAY_X  = X1-26;             /* 26 mm of cable channel behind it    */
+const TRAY_Z1 = 92;                /* stops short of the front: the side
+                                      mount lives forward of the tray     */
+const BOARD_X = TRAY_X-9.5;        /* 9 mm standoffs                      */
+/* ATX 305 × 244: the 305 runs VERTICALLY up the rear edge, 244 front-to-back */
+const BD_Y1=455, BD_Y0=BD_Y1-305, BD_Z0=Z0+8.5, BD_Z1=BD_Z0+244;
+/* rear I/O aperture 158.75 × 44.45, at the top of the rear edge.  Note the
+   ATX identity: 158.75 + 7 × 20.32 = 301 ≈ the 305 mm board height, which is
+   what fixes the whole rear-panel stack. */
+const IO_H=158.75, IO_D=44.45, SLOT_P=20.32;
+const IO_Y1=BD_Y1, IO_Y0=BD_Y1-IO_H, IO_X0=BOARD_X-IO_D;
+const SLOT1_Y=IO_Y0;               /* top of the first PCIe bracket       */
+/* RTX 5090-class AIB card: 330 × 140 mm, 3 slots (61 mm) */
+const GPU_L=330, GPU_W=140, GPU_H=3*SLOT_P;
+const GPU_X1=BOARD_X-6, GPU_X0=GPU_X1-GPU_W;
+const GPU_Y1=SLOT1_Y, GPU_Y0=SLOT1_Y-GPU_H;
+const GPU_Z0=Z0+20, GPU_Z1=GPU_Z0+GPU_L;
 
 const FINISH = {
   black:{ base:[34,34,39], tray:[28,28,33], edge:.15, ghost:.075, spill:0.88, fan:[21,21,25],  detail:.085, nm:'black' },
@@ -572,26 +621,38 @@ function renderFrame(rr, n, sp, frame, out){
 }
 /* =====================================================================
    4 · MOUNTS — where fans physically sit, and which way they face
-       U,V span the fan plane; N = U × V is the direction it blows.
+       U spans the frame ACROSS the chain (122.1 mm), V spans it ALONG
+       the chain (120 mm, modules butting edge to edge).
+       N = U × V is the direction the fan blows.
+       Slot i is a fixed position in the case, not a re-centred group:
+       one roof fan goes in the rear-most roof slot, the way it would.
    ===================================================================== */
 const MOUNTS = {
-  rear:  {max:1, nm:'Rear',   U:[1,0,0],  V:[0,1,0],  N:[0,0,1],
-          pos:(i,n)=>[10, 385, Z0+30]},
-  top:   {max:3, nm:'Top',    U:[1,0,0],  V:[0,0,1],  N:[0,-1,0],
-          pos:(i,n)=>[0, Y1-30, -40+(i-(n-1)/2)*124]},
-  bottom:{max:3, nm:'Bottom', U:[1,0,0],  V:[0,0,-1], N:[0,1,0],
-          pos:(i,n)=>[48, Y0+30, 10+(i-(n-1)/2)*124]},
-  front: {max:3, nm:'Front',  U:[-1,0,0], V:[0,1,0],  N:[0,0,-1],
-          pos:(i,n)=>[0, 215+(i-(n-1)/2)*124, Z1-32]},
-  side:  {max:3, nm:'Side',   U:[0,0,1],  V:[0,1,0],  N:[-1,0,0],
-          pos:(i,n)=>[X1-30, 215+(i-(n-1)/2)*124, 120]}
+  rear:  {max:1, nm:'Rear',  air:'exhaust', U:[-1,0,0], V:[0,1,0],  N:[0,0,-1],
+          sub:'back panel, high · exhaust',
+          pos:i=>[-26, 400, Z0+FAN_T/2+1.5]},
+  top:   {max:3, nm:'Roof',  air:'exhaust', U:[1,0,0],  V:[0,0,-1], N:[0,1,0],
+          sub:'under the 63 mm roof space · exhaust',
+          pos:i=>[0, Y1-63+FAN_T/2, -138+i*FAN_MM]},
+  bottom:{max:1, nm:'Floor', air:'intake',  U:[1,0,0],  V:[0,0,-1], N:[0,1,0],
+          sub:'one position, centred on the base · intake',
+          pos:i=>[0, Y0+FAN_T/2+15, 0]},
+  front: {max:3, nm:'Front', air:'intake',  U:[-1,0,0], V:[0,1,0],  N:[0,0,-1],
+          sub:'front intake — for cases that have one',
+          pos:i=>[0, 150+i*FAN_MM, Z1-FAN_T/2-19]},
+  side:  {max:3, nm:'Side',  air:'intake',  U:[0,0,1],  V:[0,1,0],  N:[-1,0,0],
+          sub:'right side, forward of the tray · intake',
+          pos:i=>[X1-24, 148+i*FAN_MM, 158]}
 };
-const MOUNT_ORDER=['rear','top','bottom','front','side'];
+const MOUNT_ORDER=['front','top','rear','side','bottom'];
 
-const STRIMER_MB_PATH = [[-106,398,14],[-92,345,44],[-84,262,56],[-90,180,44],[-102,120,20],[-110,96,-14]];
-/* out of the PSU bay, along the shroud, up in FRONT of the card, then over
-   its top edge to the power connectors — with real slack */
-const STRIMER_GPU_PATH= [[-86,120,-178],[-58,124,-88],[-22,136,0],[2,158,92],[10,248,124],[-6,326,104],[-40,352,56]];
+/* 24-pin: out of the board's front edge, then down the tray edge on the
+   RIGHT, in the channel between the card's inboard edge and the tray */
+const STRIMER_MB_PATH = [[80,384,14],[88,338,44],[87,262,60],[89,186,50],[92,126,20],[90,96,-40]];
+/* GPU: up out of the bottom of the case, forward along the floor, up in
+   FRONT of the card, then back over its top edge to the power connectors.
+   No shroud is asserted — we cannot know if this build has one. */
+const STRIMER_GPU_PATH= [[72,26,-172],[58,32,-72],[40,38,26],[20,92,88],[10,182,98],[12,258,72],[24,300,28]];
 
 /* =====================================================================
    5 · SCENE BUILD
@@ -615,6 +676,7 @@ function quad(a,b,c,d,opt){
 function pushBox(x0,x1,y0,y1,z0,z1,opt){
   const out=[];
   out.push(quad([x0,y1,z0],[x1,y1,z0],[x1,y1,z1],[x0,y1,z1],Object.assign({n:[0,1,0]},opt)));   /* top   */
+  out.push(quad([x0,y0,z1],[x1,y0,z1],[x1,y0,z0],[x0,y0,z0],Object.assign({n:[0,-1,0]},opt)));  /* under */
   out.push(quad([x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1],Object.assign({n:[0,0,1]},opt)));   /* front */
   out.push(quad([x1,y0,z0],[x1,y0,z1],[x1,y1,z1],[x1,y1,z0],Object.assign({n:[1,0,0]},opt)));   /* right */
   out.push(quad([x0,y0,z1],[x0,y0,z0],[x0,y1,z0],[x0,y1,z1],Object.assign({n:[-1,0,0]},opt)));  /* left  */
@@ -629,16 +691,25 @@ function buildShell(){
   faces.push(quad([X0,Y0,Z0],[X1,Y0,Z0],[X1,Y0,Z1],[X0,Y0,Z1],{n:[0,1,0], id:'floor',kind:'shell'}));
   faces.push(quad([X0,Y1,Z1],[X1,Y1,Z1],[X1,Y1,Z0],[X0,Y1,Z0],{n:[0,-1,0],id:'ceil', kind:'shell'}));
   faces.push(quad([X0,Y0,Z0],[X0,Y1,Z0],[X1,Y1,Z0],[X1,Y0,Z0],{n:[0,0,1], id:'back', kind:'shell'}));
-  faces.push(quad([X0,Y0,Z1],[X0,Y1,Z1],[X0,Y1,Z0],[X0,Y0,Z0],{n:[1,0,0], id:'tray', kind:'shell',tray:true}));
-  faces.push(quad([X1,Y0,Z0],[X1,Y1,Z0],[X1,Y1,Z1],[X1,Y0,Z1],{n:[-1,0,0],id:'side', kind:'glass'}));
+  /* RIGHT panel — the cable side.  Solid steel; the channel behind the
+     tray is between this and the tray, and we do not model what's in it. */
+  faces.push(quad([X1,Y0,Z0],[X1,Y1,Z0],[X1,Y1,Z1],[X1,Y0,Z1],{n:[-1,0,0],id:'cableside',kind:'shell'}));
+  /* LEFT panel — the main glass you actually look through */
+  faces.push(quad([X0,Y0,Z1],[X0,Y1,Z1],[X0,Y1,Z0],[X0,Y0,Z0],{n:[1,0,0], id:'glass',kind:'glass'}));
   faces.push(quad([X0,Y0,Z1],[X0,Y1,Z1],[X1,Y1,Z1],[X1,Y0,Z1],{n:[0,0,-1],id:'front',kind:'front'}));
-  /* PSU bay under the rear of the tray */
-  pushBox(X0,-15, 0,115, Z0,-45, {id:'shroud'});
-  /* motherboard, flat on the tray */
-  const bd=quad([X0+4,150,16],[X0+4,455,16],[X0+4,455,-228],[X0+4,150,-228],{n:[1,0,0],id:'mobo',board:true});
+  /* motherboard tray — the RIGHT-hand interior wall, face toward the glass.
+     It stops at TRAY_Z1 so the side mount has somewhere to live. */
+  pushBox(TRAY_X,TRAY_X+4, 2,Y1-14, Z0+4,TRAY_Z1, {id:'tray',tray:true});
+  /* the board, on the tray, components facing LEFT toward the glass */
+  const bd=quad([BOARD_X,BD_Y0,BD_Z1],[BOARD_X,BD_Y1,BD_Z1],
+                [BOARD_X,BD_Y1,BD_Z0],[BOARD_X,BD_Y0,BD_Z0],
+                {n:[-1,0,0],id:'mobo',board:true});
   bd.solid=true; faces.push(bd);
-  /* graphics card */
-  pushBox(X0+5,14, 270,330, -228,72, {id:'gpu'});
+  /* rear I/O stack: 44.45 mm off the board, 158.75 mm up the rear edge */
+  pushBox(IO_X0,BOARD_X, IO_Y0,IO_Y1, Z0,Z0+40, {id:'io'});
+  /* graphics card — off the primary x16, hanging out toward the glass
+     and forward, fans facing down */
+  pushBox(GPU_X0,GPU_X1, GPU_Y0,GPU_Y1, GPU_Z0,GPU_Z1, {id:'gpu'});
 }
 
 function makeFanDevice(mount,count,label){
@@ -730,7 +801,7 @@ function buildScene(){
   devices.length=0;
   for(const m of MOUNT_ORDER){
     const n=state.counts[m];
-    if(n>0) devices.push(makeFanDevice(m,n, MOUNTS[m].nm + (n>1? ' trio':'')));
+    if(n>0) devices.push(makeFanDevice(m,n, MOUNTS[m].nm + (n>1? ' ×'+n:'')));
   }
   if(state.strimerMB)  devices.push(makeRibbonDevice('strMB','Strimer · 24-pin',STRIMER_MB_PATH,12,11,62,[1,0,0]));
   if(state.strimerGPU) devices.push(makeRibbonDevice('strGPU','Strimer · GPU',STRIMER_GPU_PATH,4,29,30,[1,0,0]));
@@ -754,14 +825,18 @@ function buildScene(){
 /* =====================================================================
    6 · CAMERA + PROJECTION
    ===================================================================== */
+/* Negative yaw puts the eye on the −X side: through the glass panel, which
+   is the side you actually build to look at.  Iso is the money shot —
+   front-left, just above the GPU, so the board reads on the right and the
+   card foreshortens toward you. */
 const VIEWS = {
-  front:{yaw:0.10, pitch:0.24, dist:1490},
-  top:  {yaw:0.00, pitch:1.24, dist:1760},
-  iso:  {yaw:0.74, pitch:0.44, dist:1490},
-  rear: {yaw:2.44, pitch:0.34, dist:1560}
+  front:{yaw:-0.13, pitch:-0.06, dist:1620},
+  top:  {yaw:-0.13, pitch:1.26, dist:1900},
+  iso:  {yaw:-0.66, pitch:-0.14, dist:1560},
+  rear: {yaw:-2.55, pitch:0.26, dist:1700}
 };
 const cam={yaw:VIEWS.iso.yaw, pitch:VIEWS.iso.pitch, dist:VIEWS.iso.dist};
-const TARGET=[0,238,0];
+const TARGET=[0,CH/2,0];
 const FOV=30*Math.PI/180;
 let camAnim=null, camDirty=true, viewName='iso';
 
@@ -800,7 +875,32 @@ function facingRoom(f){ /* true when we can see the interior side of this face *
   return f.n[0]*(eye[0]-f.c[0])+f.n[1]*(eye[1]-f.c[1])+f.n[2]*(eye[2]-f.c[2]) > 0;
 }
 
-let order=[];
+let order=[], slots=[];
+/* every mount position that is declared but not filled, projected once per
+   camera change so it can be drawn, hovered and clicked */
+function projectSlots(){
+  slots=[];
+  for(const m of MOUNT_ORDER){
+    const M=MOUNTS[m], n=state.counts[m];
+    for(let i=n;i<M.max;i++){
+      const C=M.pos(i);
+      const o=proj(C[0],C[1],C[2],[0,0,0]);
+      const a=proj(C[0]+M.U[0]*FR,C[1]+M.U[1]*FR,C[2]+M.U[2]*FR,[0,0,0]);
+      const b=proj(C[0]+M.V[0]*FR,C[1]+M.V[1]*FR,C[2]+M.V[2]*FR,[0,0,0]);
+      slots.push({m:m,i:i,fill:i+1-n,o:o,ax:a[0]-o[0],ay:a[1]-o[1],bx:b[0]-o[0],by:b[1]-o[1]});
+    }
+  }
+}
+function slotAt(x,y){
+  let best=null;
+  for(const s of slots){
+    const det=s.ax*s.by-s.ay*s.bx; if(Math.abs(det)<1) continue;
+    const px=x-s.o[0], py=y-s.o[1];
+    const u=(px*s.by-py*s.bx)/det, v=(s.ax*py-s.ay*px)/det;
+    if(Math.abs(u)<=RU && Math.abs(v)<=RV) best=s;   /* later = nearer in list order */
+  }
+  return best;
+}
 function projectAll(){
   updateCamera();
   order=[];
@@ -841,6 +941,7 @@ function projectAll(){
   let lastDev=-1;
   for(let i=0;i<order.length;i++){ order[i].last=false; if(order[i].t==='dev') lastDev=i; }
   if(lastDev>=0) order[lastDev].last=true;
+  projectSlots();
   camDirty=false;
 }
 /* =====================================================================
@@ -860,7 +961,10 @@ function resize(){
   camDirty=true;
 }
 
-const LIGHT=(function(){const l=[0.40,0.80,0.45];const m=Math.hypot(l[0],l[1],l[2]);return [l[0]/m,l[1]/m,l[2]/m];})();
+/* key light comes from the glass side, front and above — the tray wall is
+   the surface the whole build is read against, so it must not be the
+   darkest thing in the frame */
+const LIGHT=(function(){const l=[-0.42,0.80,0.45];const m=Math.hypot(l[0],l[1],l[2]);return [l[0]/m,l[1]/m,l[2]/m];})();
 function shade(base,n,k){
   const d=Math.max(0,n[0]*LIGHT[0]+n[1]*LIGHT[1]+n[2]*LIGHT[2]);
   const f=(0.62+0.55*d)*(k||1);
@@ -946,92 +1050,132 @@ function faceDetail(f,F){
   ctx.beginPath();
   if(f.id==='ceil'||f.id==='floor'){
     const y=(f.id==='ceil')?Y1:Y0;
-    for(let i=-3;i<=3;i++){ const z=i*62; line3(ctx,[X0+16,y,z],[X1-16,y,z]); }
+    for(let i=-3;i<=3;i++){ const z=i*64; line3(ctx,[X0+16,y,z],[X1-16,y,z]); }
     line3(ctx,[X0+18,y,Z0+12],[X0+18,y,Z1-12]);
     line3(ctx,[X1-18,y,Z0+12],[X1-18,y,Z1-12]);
   }else if(f.id==='back'){
-    for(let i=0;i<7;i++){ const y=120+i*26; line3(ctx,[X0+18,y,Z0],[-24,y,Z0]); }
-    line3(ctx,[-96,300,Z0],[-96,455,Z0]); line3(ctx,[-24,300,Z0],[-24,455,Z0]);
-    line3(ctx,[-96,455,Z0],[-24,455,Z0]); line3(ctx,[-96,300,Z0],[-24,300,Z0]);
-  }else if(f.id==='tray'){
-    for(let i=0;i<5;i++){ const z=-200+i*58; line3(ctx,[X0,132,z],[X0,470,z]); }
+    /* rear I/O aperture + the seven 20.32 mm expansion-slot openings,
+       both hard against the tray side — i.e. on the RIGHT from the front */
+    const bx0=IO_X0-88;                       /* bracket openings run inboard */
+    for(let i=0;i<=7;i++){ const y=SLOT1_Y-i*SLOT_P; line3(ctx,[BOARD_X,y,Z0],[bx0,y,Z0]); }
+    line3(ctx,[bx0,SLOT1_Y,Z0],[bx0,SLOT1_Y-7*SLOT_P,Z0]);
+    line3(ctx,[BOARD_X,SLOT1_Y,Z0],[BOARD_X,SLOT1_Y-7*SLOT_P,Z0]);
+    line3(ctx,[IO_X0,IO_Y0,Z0],[IO_X0,IO_Y1,Z0]); line3(ctx,[BOARD_X,IO_Y0,Z0],[BOARD_X,IO_Y1,Z0]);
+    line3(ctx,[IO_X0,IO_Y1,Z0],[BOARD_X,IO_Y1,Z0]); line3(ctx,[IO_X0,IO_Y0,Z0],[BOARD_X,IO_Y0,Z0]);
+  }else if(f.id==='tray'&&f.n[0]===-1){
+    /* scribe lines + the cable grommets ahead of the board */
+    for(let i=0;i<4;i++){ const z=BD_Z0+20+i*64; line3(ctx,[TRAY_X,BD_Y0-6,z],[TRAY_X,BD_Y1+16,z]); }
+    for(const z of [TRAY_Z1-52,TRAY_Z1-22]){
+      line3(ctx,[TRAY_X,180,z],[TRAY_X,404,z]);
+    }
+    line3(ctx,[TRAY_X,180,TRAY_Z1-52],[TRAY_X,180,TRAY_Z1-22]);
+    line3(ctx,[TRAY_X,404,TRAY_Z1-52],[TRAY_X,404,TRAY_Z1-22]);
+    line3(ctx,[TRAY_X,132,BD_Z0+30],[TRAY_X,132,TRAY_Z1-14]);
   }else if(f.board){
-    const x=X0+4;
+    const x=BOARD_X;
     ctx.stroke();
     ctx.strokeStyle='rgba(255,255,255,0.16)'; ctx.lineWidth=1;
     ctx.beginPath();
-    line3(ctx,[x,300,-150],[x,300,10]); line3(ctx,[x,268,-150],[x,268,10]);
-    line3(ctx,[x,236,-150],[x,236,10]); line3(ctx,[x,204,-150],[x,204,10]);
-    for(let i=0;i<4;i++){ const z=-40+i*16; line3(ctx,[x,340,z],[x,440,z]); }
-    line3(ctx,[x,352,-186],[x,428,-186]); line3(ctx,[x,352,-110],[x,428,-110]);
-    line3(ctx,[x,352,-186],[x,352,-110]); line3(ctx,[x,428,-186],[x,428,-110]);
-  }else if(f.id==='shroud'&&f.n[1]===1){
-    for(let i=0;i<4;i++){ const z=Z0+26+i*26; line3(ctx,[X0+14,115,z],[-30,115,z]); }
+    /* CPU socket, up at the back under the rear I/O */
+    const sy0=BD_Y1-116, sy1=BD_Y1-24, sz0=BD_Z0+34, sz1=BD_Z0+126;
+    line3(ctx,[x,sy0,sz0],[x,sy1,sz0]); line3(ctx,[x,sy0,sz1],[x,sy1,sz1]);
+    line3(ctx,[x,sy0,sz0],[x,sy0,sz1]); line3(ctx,[x,sy1,sz0],[x,sy1,sz1]);
+    /* four DIMM slots, standing up alongside the socket */
+    for(let i=0;i<4;i++){ const z=sz1+30+i*16; line3(ctx,[x,BD_Y1-128,z],[x,BD_Y1-6,z]); }
+    /* the expansion slots the card is not using */
+    for(let i=3;i<7;i++){ const y=SLOT1_Y-i*SLOT_P-6; line3(ctx,[x,y,BD_Z0+4],[x,y,BD_Z0+92]); }
+    /* 24-pin header on the front edge */
+    line3(ctx,[x,376,BD_Z1-16],[x,412,BD_Z1-16]); line3(ctx,[x,376,BD_Z1],[x,412,BD_Z1]);
+    line3(ctx,[x,376,BD_Z1-16],[x,376,BD_Z1]); line3(ctx,[x,412,BD_Z1-16],[x,412,BD_Z1]);
+    /* chipset / M.2 down the middle */
+    line3(ctx,[x,196,BD_Z0+56],[x,196,BD_Z0+150]); line3(ctx,[x,232,BD_Z0+56],[x,232,BD_Z0+150]);
+    line3(ctx,[x,196,BD_Z0+56],[x,232,BD_Z0+56]); line3(ctx,[x,196,BD_Z0+150],[x,232,BD_Z0+150]);
+  }else if(f.id==='gpu'&&f.n[1]===1){
+    /* backplate seams along the top of the card */
+    for(let i=1;i<5;i++){ const z=GPU_Z0+i*(GPU_L/5); line3(ctx,[GPU_X0+8,GPU_Y1,z],[GPU_X1-8,GPU_Y1,z]); }
   }
   ctx.stroke();
   ctx.restore();
 }
-/* ------------- empty mounts: declared but unoccupied ------------- */
+/* a UNI FAN module outline in fan-local units: 122.1 across × 120 along */
+function modulePath(c,ku,kv,cr){
+  const u=RU*(ku||1), v=RV*(kv||1), r=cr===undefined?0.10:cr;
+  c.beginPath();
+  c.moveTo(-u+r,-v); c.lineTo(u-r,-v); c.quadraticCurveTo(u,-v,u,-v+r);
+  c.lineTo(u,v-r);   c.quadraticCurveTo(u,v,u-r,v);
+  c.lineTo(-u+r,v);  c.quadraticCurveTo(-u,v,-u,v-r);
+  c.lineTo(-u,-v+r); c.quadraticCurveTo(-u,-v,-u+r,-v); c.closePath();
+}
+function slotXform(s){ ctx.setTransform(DPR*s.ax,DPR*s.ay,DPR*s.bx,DPR*s.by,DPR*s.o[0],DPR*s.o[1]); }
+/* ------------- empty mounts: declared, unoccupied, and clickable -------------
+   A real mount is a screw pattern in sheet metal, not a floating square, so
+   it is drawn as one: dashed frame, the 105 mm screw square, a hub ring. */
+let hoverSlot=null;
 function drawEmptyMounts(){
-  ctx.setLineDash([3,5]);
-  ctx.strokeStyle='rgba(255,255,255,0.085)';
-  ctx.lineWidth=1;
-  for(const m of MOUNT_ORDER){
-    if(state.counts[m]!==0) continue;
-    const M=MOUNTS[m], n=M.max;
-    for(let i=0;i<n;i++){
-      const C=M.pos(i,n);
+  const F=FINISH[state.finish];
+  for(const s of slots){
+    const sc=Math.hypot(s.ax,s.ay); if(sc<4) continue;
+    const hot = hoverSlot && hoverSlot.m===s.m && s.i<=hoverSlot.i;
+    const lw=1/sc;
+    slotXform(s);
+    /* frame */
+    ctx.setLineDash([0.10,0.085]);
+    ctx.lineWidth=lw*(hot?2.0:1.2);
+    ctx.strokeStyle='rgba(255,255,255,'+(hot?0.50:0.075+F.detail*0.22)+')';
+    modulePath(ctx,1,1); ctx.stroke();
+    ctx.setLineDash([]);
+    if(hot){ ctx.fillStyle='rgba(255,255,255,0.045)'; ctx.fill(); }
+    /* 105 mm screw square + hub ring */
+    ctx.fillStyle='rgba(255,255,255,'+(hot?0.55:0.10+F.detail*0.30)+')';
+    ctx.beginPath();
+    for(let a=-1;a<=1;a+=2) for(let b=-1;b<=1;b+=2){
+      ctx.moveTo(a*SCREW+lw*3.2, b*SCREW); ctx.arc(a*SCREW,b*SCREW,lw*3.2,0,6.2832);
+    }
+    ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,'+(hot?0.34:0.055+F.detail*0.16)+')';
+    ctx.lineWidth=lw;
+    ctx.beginPath(); ctx.arc(0,0,0.30,0,6.2832); ctx.stroke();
+    if(hot){
       ctx.beginPath();
-      const cor=[[-1,-1],[1,-1],[1,1],[-1,1]];
-      for(let k=0;k<4;k++){
-        const sx=cor[k][0], sy=cor[k][1];
-        proj(C[0]+(M.U[0]*sx+M.V[0]*sy)*FR*1.15,
-             C[1]+(M.U[1]*sx+M.V[1]*sy)*FR*1.15,
-             C[2]+(M.U[2]*sx+M.V[2]*sy)*FR*1.15,_q);
-        if(k===0) ctx.moveTo(_q[0],_q[1]); else ctx.lineTo(_q[0],_q[1]);
-      }
-      ctx.closePath(); ctx.stroke();
+      ctx.moveTo(-0.17,0); ctx.lineTo(0.17,0); ctx.moveTo(0,-0.17); ctx.lineTo(0,0.17);
+      ctx.lineWidth=lw*2; ctx.strokeStyle='rgba(255,255,255,0.85)'; ctx.stroke();
     }
   }
+  ctx.setTransform(DPR,0,0,DPR,0,0);
   ctx.setLineDash([]);
 }
-/* ------------- mount rails at every fan position ------------- */
+/* ------------- mount rails at every occupied fan position ------------- */
 function drawRails(){
   drawEmptyMounts();
-  ctx.strokeStyle='rgba(255,255,255,'+(FINISH[state.finish].detail*0.9)+')';
-  ctx.fillStyle='rgba(255,255,255,'+(FINISH[state.finish].detail*1.4)+')';
-  ctx.lineWidth=1;
+  const F=FINISH[state.finish];
+  ctx.fillStyle='rgba(255,255,255,'+(F.detail*1.4)+')';
   for(const m of MOUNT_ORDER){
     const n=state.counts[m]; if(!n) continue;
     const M=MOUNTS[m];
     for(let i=0;i<n;i++){
-      const C=M.pos(i,n);
+      const C=M.pos(i);
       ctx.beginPath();
       for(let sx=-1;sx<=1;sx+=2) for(let sy=-1;sy<=1;sy+=2){
-        const px=C[0]+(M.U[0]*sx+M.V[0]*sy)*FR*1.02,
-              py=C[1]+(M.U[1]*sx+M.V[1]*sy)*FR*1.02,
-              pz=C[2]+(M.U[2]*sx+M.V[2]*sy)*FR*1.02;
-        proj(px,py,pz,_q);
-        ctx.moveTo(_q[0]+2.6,_q[1]); ctx.arc(_q[0],_q[1],2.6,0,6.2832);
+        proj(C[0]+(M.U[0]*sx+M.V[0]*sy)*FR*SCREW,
+             C[1]+(M.U[1]*sx+M.V[1]*sy)*FR*SCREW,
+             C[2]+(M.U[2]*sx+M.V[2]*sy)*FR*SCREW,_q);
+        ctx.moveTo(_q[0]+2.4,_q[1]); ctx.arc(_q[0],_q[1],2.4,0,6.2832);
       }
       ctx.fill();
     }
   }
 }
-/* ------------- fan body (affine, fan-local units) ------------- */
+/* ------------- fan body (affine, fan-local units) -------------
+   Modules butt edge to edge, so a trio draws as one continuous bar with
+   visible seams — which is what a UNI FAN set physically is. */
 function drawFanBody(d,i){
   const F=FINISH[state.finish], t=d.fanScr[i];
   const sc=Math.hypot(t.ax,t.ay);
   if(sc<3) return;
+  const air=MOUNTS[d.mount].air;
   ctx.setTransform(DPR*t.ax,DPR*t.ay,DPR*t.bx,DPR*t.by,DPR*t.o[0],DPR*t.o[1]);
   const lw=1/sc;
-  /* frame */
-  const R=1.15, cr=0.26;
-  ctx.beginPath();
-  ctx.moveTo(-R+cr,-R); ctx.lineTo(R-cr,-R); ctx.quadraticCurveTo(R,-R,R,-R+cr);
-  ctx.lineTo(R,R-cr); ctx.quadraticCurveTo(R,R,R-cr,R);
-  ctx.lineTo(-R+cr,R); ctx.quadraticCurveTo(-R,R,-R,R-cr);
-  ctx.lineTo(-R,-R+cr); ctx.quadraticCurveTo(-R,-R,-R+cr,-R); ctx.closePath();
+  modulePath(ctx,1,1);
   ctx.fillStyle=shade(F.fan,[0,0,0],1.0); ctx.fill();
   ctx.strokeStyle='rgba(255,255,255,'+(F.edge*0.55)+')'; ctx.lineWidth=lw; ctx.stroke();
   /* blades */
@@ -1043,11 +1187,30 @@ function drawFanBody(d,i){
     ctx.quadraticCurveTo(Math.cos(a0+0.42)*0.50,Math.sin(a0+0.42)*0.50,Math.cos(a1)*0.64,Math.sin(a1)*0.64);
   }
   ctx.stroke();
-  /* hub */
+  /* hub — brighter facing you on an intake, sunk on an exhaust.  Free
+     legibility: which way this fan moves air, without a label. */
   ctx.beginPath(); ctx.arc(0,0,0.30,0,6.2832);
-  ctx.fillStyle=shade(F.fan,[0,0,0],0.72); ctx.fill();
-  ctx.strokeStyle='rgba(255,255,255,'+(F.edge*0.4)+')'; ctx.lineWidth=lw; ctx.stroke();
+  ctx.fillStyle=shade(F.fan,[0,0,0],air==='intake'?0.94:0.55); ctx.fill();
+  ctx.strokeStyle='rgba(255,255,255,'+(F.edge*(air==='intake'?0.75:0.30))+')';
+  ctx.lineWidth=lw; ctx.stroke();
   ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+/* ------------- which way the air actually goes ------------- */
+function drawAirArrows(d){
+  const M=MOUNTS[d.mount];
+  ctx.strokeStyle='rgba(255,255,255,0.20)'; ctx.lineWidth=1.1;
+  ctx.lineCap='round'; ctx.lineJoin='round';
+  ctx.beginPath();
+  for(const C of d.centres){
+    const s=[C[0]+M.N[0]*16, C[1]+M.N[1]*16, C[2]+M.N[2]*16];
+    const e=[C[0]+M.N[0]*68, C[1]+M.N[1]*68, C[2]+M.N[2]*68];
+    line3(ctx,s,e);
+    const h=22, w=13;
+    for(const k of [-1,1]){
+      line3(ctx,e,[e[0]-M.N[0]*h+M.U[0]*w*k, e[1]-M.N[1]*h+M.U[1]*w*k, e[2]-M.N[2]*h+M.U[2]*w*k]);
+    }
+  }
+  ctx.stroke();
 }
 /* ------------- the LED light, three passes ------------- */
 function segsOf(d){
@@ -1107,7 +1270,10 @@ function strokeRuns(c,d,cols,grad){
 }
 function drawDevice(d){
   const F=FINISH[state.finish];
-  if(d.kind==='fan'){ for(let i=0;i<d.centres.length;i++) drawFanBody(d,i); }
+  if(d.kind==='fan'){
+    for(let i=0;i<d.centres.length;i++) drawFanBody(d,i);
+    drawAirArrows(d);
+  }
   else if(d.body) drawRibbonBody(d);
   const S=d.scr, segs=segsOf(d);
   ctx.lineCap=d.flat?'butt':'round'; ctx.lineJoin='round';
@@ -1212,19 +1378,32 @@ function drawFace(f){
   ctx.strokeStyle='rgba(255,255,255,'+(f.solid?F.edge*1.7:F.edge)+')';
   ctx.lineWidth=1; ctx.stroke();
 }
-/* ------------- selection ------------- */
-function brackets(box,alpha,scale){
-  const L=Math.min(20,box.w*0.24,box.h*0.24);
-  const cx=box.x+box.w/2, cy=box.y+box.h/2;
-  ctx.save();
-  ctx.translate(cx,cy); ctx.scale(scale,scale); ctx.translate(-cx,-cy);
-  ctx.strokeStyle='rgba(255,255,255,'+alpha+')';
-  ctx.lineWidth=2; ctx.lineCap='butt'; ctx.lineJoin='miter';
-  const c=[[box.x,box.y,1,1],[box.x+box.w,box.y,-1,1],[box.x,box.y+box.h,1,-1],[box.x+box.w,box.y+box.h,-1,-1]];
-  ctx.beginPath();
-  c.forEach(k=>{ ctx.moveTo(k[0]+k[2]*L,k[1]); ctx.lineTo(k[0],k[1]); ctx.lineTo(k[0],k[1]+k[3]*L); });
-  ctx.stroke();
-  ctx.restore();
+/* ------------- selection -------------
+   A screen-space bracket lies about where a thing is the moment the camera
+   leaves front-on.  Selection is drawn in the object's OWN plane instead, so
+   it sits on the hardware at every angle. */
+function focusRing(d,alpha,grow){
+  ctx.lineCap='round'; ctx.lineJoin='round';
+  if(d.kind==='fan'){
+    for(const t of d.fanScr){
+      const sc=Math.hypot(t.ax,t.ay); if(sc<4) continue;
+      const lw=1/sc, g=1+(grow-1)*0.5;
+      ctx.setTransform(DPR*t.ax,DPR*t.ay,DPR*t.bx,DPR*t.by,DPR*t.o[0],DPR*t.o[1]);
+      modulePath(ctx,1.075*g,1.075*g,0.10);
+      ctx.lineWidth=lw*5.5; ctx.strokeStyle='rgba(255,255,255,'+(alpha*0.16).toFixed(3)+')'; ctx.stroke();
+      ctx.lineWidth=lw*1.9; ctx.strokeStyle='rgba(255,255,255,'+alpha+')'; ctx.stroke();
+    }
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+  }else{
+    const S=d.scr, n=d.per, L=d.leds;
+    ctx.beginPath();
+    ctx.moveTo(S[L*2],S[L*2+1]);
+    for(let i=1;i<n;i++) ctx.lineTo(S[(L+i)*2],S[(L+i)*2+1]);
+    for(let i=n-1;i>=0;i--) ctx.lineTo(S[(L+n+i)*2],S[(L+n+i)*2+1]);
+    ctx.closePath();
+    ctx.lineWidth=7; ctx.strokeStyle='rgba(255,255,255,'+(alpha*0.16).toFixed(3)+')'; ctx.stroke();
+    ctx.lineWidth=2;   ctx.strokeStyle='rgba(255,255,255,'+alpha+')'; ctx.stroke();
+  }
 }
 let selAnim=1, hoverId=null;
 const FONT=getComputedStyle(document.documentElement).getPropertyValue('--font').trim();
@@ -1236,23 +1415,8 @@ function tracked(c,txt,x,y,sp,align){
   for(let i=0;i<txt.length;i++){ c.fillText(txt[i],cx,y); cx+=c.measureText(txt[i]).width+sp; }
   return total;
 }
-/* one controller drives all three fans — the plate says so, quietly */
-function drawTether(d){
-  const t=d.fanScr;
-  if(!t||t.length<2) return;
-  let my=-1e9;
-  for(const p of t) my=Math.max(my,p.o[1]+Math.abs(p.by)+Math.abs(p.ay)*0.35);
-  const y=my+14;
-  ctx.strokeStyle='rgba(255,255,255,0.16)'; ctx.lineWidth=1;
-  ctx.beginPath();
-  ctx.moveTo(t[0].o[0],y-5); ctx.lineTo(t[0].o[0],y);
-  ctx.lineTo(t[t.length-1].o[0],y); ctx.lineTo(t[t.length-1].o[0],y-5);
-  for(let i=1;i<t.length-1;i++){ ctx.moveTo(t[i].o[0],y-5); ctx.lineTo(t[i].o[0],y); }
-  ctx.stroke();
-  return y;
-}
 function drawGround(){
-  const rad=430;
+  const rad=CD*0.98;
   const o=proj(0,-4,0,[0,0,0]);
   const pu=proj(rad,-4,0,[0,0,0]);
   const pv=proj(0,-4,rad,[0,0,0]);
@@ -1267,6 +1431,52 @@ function drawGround(){
   ctx.restore();
   ctx.setTransform(DPR,0,0,DPR,0,0);
   ctx.globalAlpha=1; ctx.globalCompositeOperation='source-over';
+}
+/* ------------- orientation -------------
+   Orbit far enough and a symmetrical box stops telling you which way round
+   it is.  The compass names the four faces that actually differ, and fades
+   the ones pointing away from you. */
+const COMPASS=[
+  {v:[0,0,1],  t:'FRONT'},
+  {v:[0,0,-1], t:'REAR'},
+  {v:[-1,0,0], t:'GLASS'},
+  {v:[1,0,0],  t:'TRAY'}
+];
+function viewWords(){
+  if(cam.pitch>1.02) return 'overhead';
+  const dx=eye[0]-TARGET[0], dz=eye[2]-TARGET[2], l=Math.hypot(dx,dz)||1;
+  const nx=dx/l, nz=dz/l, p=[];
+  if(nz>0.38) p.push('front'); else if(nz<-0.38) p.push('rear');
+  if(nx<-0.38) p.push('glass side'); else if(nx>0.38) p.push('cable side');
+  return p.join(' · ')||'three-quarter';
+}
+function drawCompass(){
+  const R=25, cx=44, cy=VH-46;
+  ctx.save();
+  ctx.strokeStyle='rgba(255,255,255,0.10)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.arc(cx,cy,R,0,6.2832); ctx.stroke();
+  ctx.font='500 8.5px '+FONT; ctx.textBaseline='middle';
+  for(const c of COMPASS){
+    const sx=c.v[0]*rgt[0]+c.v[1]*rgt[1]+c.v[2]*rgt[2];
+    const sy=-(c.v[0]*upv[0]+c.v[1]*upv[1]+c.v[2]*upv[2]);
+    const dep=c.v[0]*fwd[0]+c.v[1]*fwd[1]+c.v[2]*fwd[2];   /* <0 = toward us */
+    const a=0.16+0.52*Math.max(0,-dep);
+    const l=Math.hypot(sx,sy);
+    if(l<0.06){ continue; }
+    ctx.strokeStyle='rgba(255,255,255,'+a.toFixed(3)+')'; ctx.lineWidth=1.4;
+    ctx.beginPath();
+    ctx.moveTo(cx+sx*R*0.52,cy+sy*R*0.52); ctx.lineTo(cx+sx*R,cy+sy*R);
+    ctx.stroke();
+    ctx.fillStyle='rgba(226,226,235,'+(a*1.15).toFixed(3)+')';
+    tracked(ctx,c.t,cx+sx*R*1.62,cy+sy*R*1.62,0.7,'c');
+  }
+  /* up */
+  const uy=-(upv[1]);
+  ctx.strokeStyle='rgba(255,255,255,0.30)'; ctx.lineWidth=1.2;
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx,cy+uy*R*0.62); ctx.stroke();
+  ctx.fillStyle='rgba(255,255,255,0.55)';
+  ctx.beginPath(); ctx.arc(cx,cy,1.9,0,6.2832); ctx.fill();
+  ctx.restore();
 }
 let marquee=null;
 function render(){
@@ -1299,25 +1509,33 @@ function render(){
   }
   if(!railsDone) drawRails();
   /* neutral selection indication — never a saturated colour */
-  const sc=1.04-0.04*Math.min(1,selAnim);
+  const sc=1.06-0.06*Math.min(1,selAnim);
   ctx.font='500 11px '+FONT; ctx.textBaseline='middle';
   for(const d of devices){
     const on=state.sel.has(d.id), hv=(hoverId===d.id);
     const b=d.sbox; if(!b) continue;
-    let ty=null;
-    if(d.kind==='fan'&&d.centres.length>1) ty=drawTether(d);
-    if(on) brackets({x:b.x-9,y:b.y-9,w:b.w+18,h:b.h+18},0.55,sc);
-    else if(hv) brackets({x:b.x-9,y:b.y-9,w:b.w+18,h:b.h+18},0.20,1);
+    if(on) focusRing(d,0.62,sc);
+    else if(hv) focusRing(d,0.24,1);
     if(on||hv){
-      const y=(ty!=null?ty:b.y+b.h+8)+12;
-      ctx.fillStyle='rgba(212,212,222,'+(on?0.72:0.44)+')';
-      tracked(ctx,(d.nm+' · '+d.leds+' LEDS').toUpperCase(),b.x+b.w/2,y,0.9,'c');
+      const y=b.y+b.h+20;
+      const air=d.kind==='fan'? ' · '+MOUNTS[d.mount].air.toUpperCase() : '';
+      ctx.fillStyle='rgba(212,212,222,'+(on?0.78:0.46)+')';
+      tracked(ctx,(d.nm+' · '+d.leds+' LEDS').toUpperCase()+air,b.x+b.w/2,y,0.9,'c');
       if(on&&d.kind==='fan'&&d.centres.length>1){
         ctx.fillStyle='rgba(139,139,151,0.60)';
-        tracked(ctx,'ONE CONTROLLER · ONE EFFECT',b.x+b.w/2,y+14,0.9,'c');
+        tracked(ctx,'ONE INTERLOCKED ASSEMBLY · ONE CONTROLLER · ONE EFFECT',b.x+b.w/2,y+14,0.9,'c');
       }
     }
   }
+  if(hoverSlot){
+    const s=hoverSlot, M=MOUNTS[s.m];
+    ctx.font='500 11px '+FONT; ctx.textBaseline='middle';
+    ctx.fillStyle='rgba(244,244,247,0.86)';
+    const nf=s.fill;
+    tracked(ctx,'+ '+nf+' '+M.nm.toUpperCase()+' FAN'+(nf>1?'S':'')+' · '+(nf*44)+' LEDS',
+            s.o[0], s.o[1]+Math.abs(s.by)*RV+18, 0.9,'c');
+  }
+  drawCompass();
   if(marquee){
     const x=Math.min(marquee.x0,marquee.x1), y=Math.min(marquee.y0,marquee.y1);
     const w=Math.abs(marquee.x1-marquee.x0), h=Math.abs(marquee.y1-marquee.y0);
@@ -1403,12 +1621,9 @@ function buildMountRows(){
     const M=MOUNTS[m];
     const row=document.createElement('div');
     row.className='mrow';
-    row.innerHTML='<div class="lb"><b>'+M.nm.toUpperCase()+'</b><span>'+
-      (m==='rear'?'high on the back panel':
-       m==='top'?'ceiling, blowing down':
-       m==='bottom'?'floor, blowing up':
-       m==='front'?'front intake':'side radiator, toward the front')+
-      '</span></div><div class="step"><button data-m="'+m+'" data-d="-1">−</button>'+
+    row.innerHTML='<div class="lb"><b>'+M.nm.toUpperCase()+
+      '<i>'+M.max+'×120</i></b><span>'+M.sub+'</span></div>'+
+      '<div class="step"><button data-m="'+m+'" data-d="-1">−</button>'+
       '<span class="val" id="cnt-'+m+'">0</span><button data-m="'+m+'" data-d="1">+</button></div>';
     host.appendChild(row);
   }
@@ -1497,9 +1712,12 @@ function syncAll(){
     st[1].disabled=state.counts[m]===MOUNTS[m].max;
   }
   const fans=MOUNT_ORDER.reduce((a,m)=>a+state.counts[m],0);
-  el('totLeft').textContent=fans+' fan'+(fans===1?'':'s')+' · '+MOUNT_ORDER.filter(m=>state.counts[m]).length+' mounts occupied';
+  const maxFans=MOUNT_ORDER.reduce((a,m)=>a+MOUNTS[m].max,0);
+  el('totLeft').textContent=fans+' of '+maxFans+' positions filled · '+
+    MOUNT_ORDER.filter(m=>state.counts[m]).length+' of '+MOUNT_ORDER.length+' mounts';
   el('totRight').innerHTML='<b>'+(fans*44)+'</b> LEDs';
-  el('caseNote').textContent = state.counts.front===0 ? 'front is glass' : 'front is mesh';
+  el('caseNote').textContent = CW+' × '+CD+' × '+CH+' mm · '+
+    (state.counts.front===0 ? 'front glass' : 'front mesh');
   el('tglMB').classList.toggle('on',state.strimerMB);
   el('tglGPU').classList.toggle('on',state.strimerGPU);
 
@@ -1530,6 +1748,7 @@ function syncAll(){
     ? sel.length+' device'+(sel.length>1?'s':'')+' selected · '+totalLeds(sel)+' LEDs'
     : totalLeds(devices)+' LEDs across '+devices.length+' device'+(devices.length===1?'':'s');
   buildRoster();
+  writeHash();
 }
 
 /* =====================================================================
@@ -1556,6 +1775,7 @@ function setView(name){
   while(dy<-Math.PI) dy+=2*Math.PI;
   camAnim={t:0, dur:400, y0:cam.yaw, dy:dy, p0:cam.pitch, dp:v.pitch-cam.pitch, d0:cam.dist, dd:v.dist-cam.dist};
   document.querySelectorAll('.vb[data-view]').forEach(b=>b.classList.toggle('on',b.dataset.view===name));
+  writeHash();
 }
 document.querySelectorAll('.vb[data-view]').forEach(b=>b.onclick=()=>setView(b.dataset.view));
 el('resetView').onclick=()=>setView('iso');
@@ -1579,10 +1799,14 @@ stage.addEventListener('pointerdown',e=>{
 stage.addEventListener('pointermove',e=>{
   const rr=stage.getBoundingClientRect();
   if(!drag){
-    const h=hitTest(e.clientX-rr.left,e.clientY-rr.top);
+    const mx=e.clientX-rr.left, my=e.clientY-rr.top;
+    const h=hitTest(mx,my);
     hoverId=h?h.id:null;
+    hoverSlot=h?null:slotAt(mx,my);
+    wrapEl.classList.toggle('pick',!!(h||hoverSlot));
     return;
   }
+  hoverSlot=null; wrapEl.classList.remove('pick');
   const r=rr;
   if(drag.mode==='orbit'){
     const dx=e.clientX-drag.x, dy=e.clientY-drag.y;
@@ -1617,12 +1841,22 @@ function hitTest(x,y){
 stage.addEventListener('pointerup',e=>{
   if(!drag) return;
   wrapEl.classList.remove('drag','marq');
+  if(drag.mode==='orbit'&&drag.moved>=5) writeHash();
   if(drag.mode==='orbit'){
     if(drag.moved<5){
       const hit=hitTest(drag.sx,drag.sy);
-      state.sel.clear();
-      if(hit) state.sel.add(hit.id);
-      selAnim=0; syncAll();
+      if(hit){
+        state.sel.clear(); state.sel.add(hit.id); selAnim=0; syncAll();
+      }else{
+        /* clicking an empty mount fills that mount up to and including the
+           slot you clicked — the dashed run under the cursor is the preview */
+        const s=slotAt(drag.sx,drag.sy);
+        if(s){
+          state.counts[s.m]=s.i+1;
+          hoverSlot=null;
+          buildScene(); selAnim=0; syncAll();
+        }else{ state.sel.clear(); syncAll(); }
+      }
     }
   }else{
     const x0=Math.min(marquee.x0,marquee.x1), x1=Math.max(marquee.x0,marquee.x1);
@@ -1639,7 +1873,7 @@ stage.addEventListener('pointerup',e=>{
 stage.addEventListener('pointercancel',()=>{drag=null;marquee=null;wrapEl.classList.remove('drag','marq');});
 stage.addEventListener('wheel',e=>{
   e.preventDefault();
-  cam.dist=Math.max(820,Math.min(2900,cam.dist*(1+Math.sign(e.deltaY)*0.085)));
+  cam.dist=Math.max(900,Math.min(3400,cam.dist*(1+Math.sign(e.deltaY)*0.085)));
   camAnim=null; camDirty=true;
 },{passive:false});
 window.addEventListener('keydown',e=>{
@@ -1654,7 +1888,7 @@ el('tglMB').onclick=()=>{ state.strimerMB=!state.strimerMB; buildScene(); syncAl
 el('tglGPU').onclick=()=>{ state.strimerGPU=!state.strimerGPU; buildScene(); syncAll(); };
 el('clearSel').onclick=()=>{ state.sel.clear(); syncAll(); };
 el('loadRig').onclick=()=>{
-  state.counts={rear:1, top:3, bottom:0, front:1, side:0};
+  state.counts={rear:1, top:3, bottom:0, front:0, side:1};
   state.strimerMB=true; state.strimerGPU=true;
   state.finish='black'; state.kind='static'; state.palIdx=0; state.speed=2;
   state.sel.clear();
@@ -1690,14 +1924,66 @@ function loop(now){
 
   fAcc++; fTime+=dt;
   if(fTime>500){ state.fps=Math.round(fAcc*1000/fTime); fAcc=0; fTime=0;
-    el('tpFps').textContent=state.fps+' fps';
     drawWash(); syncRoster();
   }
   const ph=(state.clock/(SPEEDS[state.speed]*1000))%1;
   el('breath').style.opacity=(0.06+0.06*(0.5-0.5*Math.cos(ph*6.2832))).toFixed(3);
   el('dotGlow').style.opacity=(0.72+0.28*(0.5-0.5*Math.cos(ph*6.2832))).toFixed(3);
-  el('hud').textContent = (viewName==='free'?'free':viewName)+' · yaw '+
-    Math.round(((cam.yaw*180/Math.PI)%360+360)%360)+'° · pitch '+Math.round(cam.pitch*180/Math.PI)+'° · '+Math.round(cam.dist)+' mm';
+  el('hudView').textContent = (viewName==='free'?'free orbit':viewName);
+  el('hudWhere').textContent = viewWords();
+  el('hudNum').textContent = 'yaw '+Math.round(((cam.yaw*180/Math.PI)%360+360)%360)+
+    '° · pitch '+Math.round(cam.pitch*180/Math.PI)+'° · '+Math.round(cam.dist)+' mm · '+state.fps+' fps';
+}
+
+/* =====================================================================
+   11b · DEEP LINK — the whole build is in the URL, so a particular rig at a
+        particular angle can be handed to someone else (or to a screenshot).
+        #front=0&top=3&rear=1&side=3&bottom=1&mb=1&gpu=1&f=white&fx=meteor
+        &pal=2&spd=2&v=iso   (or yaw=/pitch=/dist= for a free angle)
+   ===================================================================== */
+let hashSelf=false;
+function readHash(){
+  const h=(location.hash||'').replace(/^#/,'');
+  if(!h) return false;
+  const q=new URLSearchParams(h);
+  const num=(k,lo,hi,d)=>{ if(!q.has(k)) return d; const n=parseFloat(q.get(k)); return isNaN(n)?d:Math.max(lo,Math.min(hi,n)); };
+  if(q.has('f')) state.finish = q.get('f')==='white'?'white':'black';
+  for(const m of MOUNT_ORDER) if(q.has(m)) state.counts[m]=Math.round(num(m,0,MOUNTS[m].max,state.counts[m]));
+  if(q.has('mb'))  state.strimerMB  = q.get('mb')==='1';
+  if(q.has('gpu')) state.strimerGPU = q.get('gpu')==='1';
+  if(q.has('fx') && KIX[q.get('fx')]!==undefined) state.kind=q.get('fx');
+  state.palIdx=Math.round(num('pal',0,PALETTES.length-1,state.palIdx));
+  state.speed =Math.round(num('spd',0,SPEEDS.length-1,state.speed));
+  const v=q.get('v');
+  if(v && VIEWS[v]){ viewName=v; cam.yaw=VIEWS[v].yaw; cam.pitch=VIEWS[v].pitch; cam.dist=VIEWS[v].dist; }
+  if(q.has('yaw')||q.has('pitch')||q.has('dist')){
+    cam.yaw  =num('yaw',-99,99,cam.yaw);
+    cam.pitch=num('pitch',-0.28,1.40,cam.pitch);
+    cam.dist =num('dist',900,3400,cam.dist);
+    viewName='free';
+  }
+  camAnim=null; camDirty=true;
+  return true;
+}
+function writeHash(){
+  const p=[];
+  for(const m of MOUNT_ORDER) p.push(m+'='+state.counts[m]);
+  p.push('mb='+(state.strimerMB?1:0),'gpu='+(state.strimerGPU?1:0));
+  p.push('f='+state.finish,'fx='+state.kind,'pal='+state.palIdx,'spd='+state.speed);
+  p.push('v='+viewName);
+  if(viewName==='free') p.push('yaw='+cam.yaw.toFixed(3),'pitch='+cam.pitch.toFixed(3),'dist='+Math.round(cam.dist));
+  const h='#'+p.join('&');
+  if(h===location.hash) return;
+  hashSelf=true;
+  try{ history.replaceState(null,'',h); }catch(_){ location.hash=h; }
+}
+window.addEventListener('hashchange',()=>{
+  if(hashSelf){ hashSelf=false; return; }
+  if(readHash()){ buildScene(); applySpecs(); syncAll(); }
+});
+/* the effect spec lives per-device; after a hash load push the global one down */
+function applySpecs(){
+  for(const d of devices){ d.spec.kind=state.kind; d.spec.pal=state.palIdx; d.spec.speed=state.speed; d.key=null; }
 }
 
 /* =====================================================================
@@ -1705,10 +1991,12 @@ function loop(now){
    ===================================================================== */
 buildMountRows(); buildFx(); buildPals(); buildSpeed();
 resize();
-state.counts={rear:1, top:3, bottom:0, front:1, side:0};
+state.counts={rear:1, top:3, bottom:0, front:0, side:1};
 state.strimerMB=true; state.strimerGPU=true;
+const linked=readHash();
 buildScene();
-const s0=devices.find(d=>d.id==='strMB'); if(s0) s0.spec.kind='meteor';
+applySpecs();
+if(!linked){ const s0=devices.find(d=>d.id==='strMB'); if(s0) s0.spec.kind='meteor'; }
 syncAll();
 updateDevices(); drawWash();
 new ResizeObserver(()=>{ resize(); }).observe(wrapEl);
