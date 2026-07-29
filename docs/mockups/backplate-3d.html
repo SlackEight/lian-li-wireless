@@ -326,7 +326,7 @@ canvas{display:block}
         <div class="isect">
           <h3>Strimers <em>max two</em></h3>
           <button class="tgl" id="tglMB"><span class="bx">✓</span><span class="tx"><b>Motherboard 24-pin</b><span>flat semicircle out to the glass and round to the board</span></span><span class="n">132</span></button>
-          <button class="tgl" id="tglGPU"><span class="bx">✓</span><span class="tx"><b>GPU</b><span>around the card and up its left flank, edge-on from the front</span></span><span class="n">116</span></button>
+          <button class="tgl" id="tglGPU"><span class="bx">✓</span><span class="tx"><b>GPU</b><span>around the card and up its left flank, edge-on from the front</span></span><span class="n">180</span></button>
         </div>
 
         <div class="isect">
@@ -836,7 +836,7 @@ function buildScene(){
     if(n>0) devices.push(makeFanDevice(m,n, MOUNTS[m].nm + (n>1? ' ×'+n:'')));
   }
   if(state.strimerMB)  devices.push(makeRibbonDevice('strMB','Strimer · 24-pin',STRIMER_MB_PATH,12,11,62,[0,0,-1]));
-  if(state.strimerGPU) devices.push(makeRibbonDevice('strGPU','Strimer · GPU',STRIMER_GPU_PATH,4,29,44,[0,1,0]));
+  if(state.strimerGPU) devices.push(makeRibbonDevice('strGPU','Strimer · GPU',STRIMER_GPU_PATH,12,15,55,[0,1,0]));
   /* centroid + world span, for spill and hit-testing */
   for(const d of devices){
     let cx=0,cy=0,cz=0, n=d.pts3.length/3;
