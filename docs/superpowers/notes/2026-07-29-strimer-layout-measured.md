@@ -57,3 +57,45 @@ Adding upload -> poll the echoed `effect_index` -> resend until it matches made 
 probe reliable immediately. The daemon's RGB path fires once and assumes success;
 it needs the same read-back-and-retry. This, not any payload ceiling, is the most
 likely cause of "the effect will not change".
+
+
+---
+
+## Corroborated against published sources + OpenRGB (same day)
+
+The owner rightly asked whether this was already documented. It is, and it agrees:
+
+- **Lian Li's own product page**: effects can be set "on each channel **(2 light strips)**" —
+  the channel-drives-two-guides model, stated in marketing copy all along.
+- **Retail specs**, 24-pin: "**6 channels** for individual lighting control".
+- **SRGBmods teardown**: the ATX 24-pin Strimer carries **6 data lines** (the dual-8-pin GPU
+  cable has 4; the triple-8-pin has 6).
+- **OpenRGB `LianLiStrimerLConnectController`** states it in code:
+  `STRIMERLCONNECT_STRIP_COUNT = 12`, split as 6 zones x 20 LEDs named "24 Pin ATX Strip 0..5"
+  and 6 zones x 27 LEDs named "8 Pin GPU Strip 0..5", all `ZONE_TYPE_LINEAR`.
+  Also `BRIGHTNESS_MAX = 4` — the same 0-4 brightness index our RF protocol uses, so that
+  scale is a Lian Li house convention rather than a wireless quirk.
+
+### The counts genuinely differ between wired and wireless — ours are right
+Wired L-Connect: 120 (6x20) and 162 (6x27). Our wireless devices: 132 (6x22) and 174 (6x29).
+Exactly +2 LEDs per channel on both. **Verified on hardware**: lighting only indices 162..173
+on the wireless GPU cable lit the last channel's final stretch, from the connector back about
+40% of its length. Those LEDs exist. `led_count_override` is correct; the wireless variants
+simply carry two more LEDs per strip than the wired ones.
+
+### Firmware VALIDATES frame length — over-length uploads are silently refused
+Sending 186 LEDs to the 174-LED device failed four consecutive verified attempts; 174 was
+accepted immediately. 186 LEDs is 558 bytes against a 55,880-byte ceiling, so this is a
+length check, not a payload limit.
+
+**Consequence, and the best explanation yet for "this Strimer only accepts static colour":**
+if our LED count for a device is ever too high, EVERY animation upload is refused, forever,
+with no error — while a static colour set through another path still lands. A device whose
+count we get wrong looks exactly like a device that "won't take effects".
+
+Worth building: a startup count-probe that walks the frame length down until the device
+accepts, measuring the true LED count with no user involvement.
+
+### Index direction, confirmed on both cables
+Index 0 sits at the FAR end; indices increase toward the connector. The highest-numbered
+channel is the outermost guide pair (right-most on the GPU cable as mounted).

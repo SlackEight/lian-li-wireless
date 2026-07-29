@@ -197,7 +197,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "beyond" => {
             let rec = pick(args.get(1))?;
             let from: usize = args.get(2).ok_or("need a start index")?.parse()?;
-            let n = (rec.total_leds() as usize).max(from + 24);
+            // Send EXACTLY the device's own count. Padding past it made the
+            // device refuse the frame outright (186 into a 174-LED device,
+            // four rejections) — which is itself a finding: over-length
+            // uploads are rejected, not silently truncated.
+            let n = rec.total_leds() as usize;
             let frame: Vec<[u8; 3]> = (0..n)
                 .map(|i| if i >= from { [0, 255, 120] } else { OFF })
                 .collect();
